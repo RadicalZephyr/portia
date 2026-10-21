@@ -23,6 +23,78 @@ for you.
 [na]: https://github.com/sodiumFRP/sodium
 [na-sem]: https://github.com/SodiumFRP/sodium/tree/master/denotational
 
+## What is FRP?
+
+You've probably heard about [reactive programming][rp]. It's been kind of a thing for a while
+now. Well, _functional_ reactive programming is just reactive programming where you only
+use [functional programming][fp] in your reactions. That's it, it's really just code that
+uses both those paradigms at once.
+
+[rp]: https://en.wikipedia.org/wiki/Reactive_programming
+[fp]: https://en.wikipedia.org/wiki/Functional_programming
+
+## Why Portia?
+
+Portia isn't _just_ FRP though. Portia implements Sodium's denotational semantics, which
+basically means that each operator has a mathematical definition of what it does and how
+it works when combined with other operators. If the code you run using Portia follows the
+rules, then the meaning of your code and how Portia's FRP engine will run it follows
+directly from the meaning of each of it's parts and your program will behave consistently
+and predictably.
+
+In short: if you're writing long-running, event-driven programs that want to _react_ to
+many different kinds of I/O, you want to work in a system that makes writing entire
+classes of event-handling bugs impossible`*` to write, and you want the pieces of your
+program to fit together like building with Legos. Phew, that's dense, let's break it down.
+
+`*` as long as you follow the rules!
+
+> This entire section is basically a very brief paraphrasing of the [entire first
+> chapter][frp-book-ch1] of Stephen Blackheath and Anthony Jones' book ["Functional
+> Reactive Programming"][frp-book] which you can read for free online.
+
+[frp-book-ch1]: https://livebook.manning.com/book/functional-reactive-programming/chapter-1
+[frp-book]: https://www.manning.com/books/functional-reactive-programming
+
+If your program hangs out for a long time, like a server or a daemon, or a GUI you might
+benefit from using FRP. Batch programs that do one thing to a lot of data and then are
+done are usually a less good fit for FRP.
+
+If your long-running program deals with a lot of different input and output (I/O). When I say I/O I
+basically mean any or all of the following:
+
+- **People**: clicks, keys, touch, gamepads
+- **Networks**: connections, messages
+- **Time**: timers, ticks, frames, schedules
+- **The Machine**: filesystem, signals, child processes, queues between processes
+- **Hardware**: sensors, interrupts, serial ports
+
+So, basically, the world right? If your program does something that interacts with the
+world beyond your program's process, then it might benefit from FRP.
+
+If your long-running, I/O heavy program (see above) suffers from any of the following
+problems, you might benefit from FRP:
+
+- Missed first event
+- Messy state: lots of threads or async tasks sharing state with `Rc<Refcell<T>>` or `Arc<Mutex<T>>` everywhere
+- Threading issues: fighting with the compiler about `Send` and/or `Sync` and solving it with `Mutex` everywhere
+- Accidental recursion: getting `BorrowMutError`'s or sporadic deadlocks at runtime
+- Leaking callbacks: this is less common in Rust because we don't use callbacks a lot
+- Unpredictable event ordering: this is complex enough it gets it's own section below
+
+For a more thorough explanation of these "six plagues" see [Banishing the Six Plagues][six-plagues].
+
+[six-plagues]: https://livebook.manning.com/book/functional-reactive-programming/chapter-1#ch01lev1sec8__title
+
+Finally, if your long-running, I/O heavy program, with event handling bugs is getting
+increasingly complex and hard to change as you keep building it, you might benefit from
+FRP. For me, building with FRP is the closest that programming gets to building with
+totally untrademarked snap-together building blocks. In more precise terms, if you follow
+the rules for how you write your code, then your FRP code written in Portia should be
+mathematically **compositional**, which basically means that combining two parts that work
+shouldn't ever cause them to stop working correctly, and the way you combine them is
+precisely how they will work together.
+
 ## Status
 
 Portia v0.0.1 is an initial spike built entirely by an LLM agent to prove the interface
