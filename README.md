@@ -5,7 +5,7 @@
 ## Overview
 
 **Portia** is a modern, idiomatic Rust implementation of **Functional Reactive Programming
-(FRP)** - built to be lightweight, expressive, and highly optimized by the compiler.
+(FRP)** - built to be lightweight, expressive, and easily optimized by the compiler.
 
 It implements [**Sodium**'s][na] [denotational semantics][na-sem], but the API and core
 engine have been designed from the ground up to leverage Rust’s strengths:
