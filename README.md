@@ -1,6 +1,6 @@
 # **Portia**
 
-**Lightweight FRP, spun from Rust.**
+**Lightweight functional reactive programming, spun from Rust.**
 
 ## Overview
 
