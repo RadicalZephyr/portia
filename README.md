@@ -117,7 +117,7 @@ issues](https://github.com/portia-rs/portia/issues), and they'll shape 0.1.
 
 ## Usage
 
-Add Portia to your project using Cargo:
+Add Portia to your project with `cargo add portia` or by editing your `Cargo.toml`:
 
 ```toml
 [dependencies]
