@@ -18,7 +18,7 @@
 //! so far, printing both after every line. In a clone of the repository,
 //! `cargo run --example word_count_mut` runs it.
 //!
-//! ```no_run
+//! ```rust
 //! use portia::prelude::*;
 //!
 //! fn main() -> std::io::Result<()> {
@@ -38,10 +38,20 @@
 //!         (lines_in, summary)
 //!     });
 //!
+//!     let mut i = 0;
+//!     let expected = [
+//!         "0 words, longest: \"\"",
+//!         "2 words, longest: \"Hello, World!\"",
+//!         "3 words, longest: \"Hello, World!\"",
+//!         "6 words, longest: \"Try Portia Today!\"",
+//!     ];
 //!     // Fires once now, with the initial values, then again on every step.
-//!     let _listener = rt.listen_cell(summary, |s| println!("{s}"));
-//!     for line in std::io::stdin().lines() {
-//!         rt.send(lines_in, line?);
+//!     let _listener = rt.listen_cell(summary, move |s| {
+//!         assert_eq!(s, expected[i]);
+//!         i += 1;
+//!     });
+//!     for line in ["Hello, World!", "Foo", "Try Portia Today!"] {
+//!         rt.send(lines_in, line.to_string());
 //!     }
 //!     Ok(())
 //! }
