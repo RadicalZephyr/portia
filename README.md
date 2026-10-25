@@ -133,8 +133,9 @@ use portia::prelude::*;
 fn main() -> std::io::Result<()> {
     let mut rt = Runtime::local();
     let _ = rt.build(|b| {
-        <FRP code goes here>
+        // FRP code goes here
     });
+    // I/O code goes here
 }
 ```
 
