@@ -1,4 +1,4 @@
-//! Lightweight FRP rooted in Rust.
+//! Lightweight Functional Reactive Programming, spun from Rust.
 //!
 //! Portia implements the Sodium FRP denotational semantics with an API that
 //! separates building FRP logic from driving it with I/O.
