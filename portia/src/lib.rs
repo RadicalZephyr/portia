@@ -171,10 +171,6 @@ mod source;
 mod token;
 mod trace;
 
-/// Derives [`Trace`](trait@Trace) for a struct or an enum, with
-/// `#[trace(skip)]` for a field that cannot hold tokens.
-#[cfg(feature = "derive")]
-pub use portia_derive::Trace;
 pub use build::{BuildContext, CellLoop, StateLoop, StreamLoop};
 pub use builder::{Builder, Portable, Stores};
 pub use cell::CellRef;
@@ -189,6 +185,10 @@ pub use lift::Lift;
 #[cfg(target_has_atomic = "ptr")]
 pub use mode::Threaded;
 pub use mode::{Accepts, Local, Mode};
+/// Derives [`Trace`](trait@Trace) for a struct or an enum, with
+/// `#[trace(skip)]` for a field that cannot hold tokens.
+#[cfg(feature = "derive")]
+pub use portia_derive::Trace;
 pub use runtime::{
     Anchor, Anchored, CollectionPolicy, IoTransaction, Listener, Runtime, Transaction,
 };
