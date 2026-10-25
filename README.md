@@ -152,14 +152,20 @@ fn main() -> std::io::Result<()> {
     let (lines_in, summary) = rt.build(|b| {
         let (lines, lines_in) = b.input::<String>();
         let lines = lines.share(b); // two consumers below
+
+        // Count the number of words in each received line
         let words = lines.accumulate_mut(b, 0_usize, |line, n: &mut usize| {
             *n += line.split_whitespace().count();
         });
+
+        // Store the line with the most characters in it
         let longest = lines.accumulate_mut(b, String::new(), |line, best: &mut String| {
             if line.chars().count() > best.chars().count() {
                 *best = line;
             }
         });
+
+        // Format the summary to be printed each time new input is received
         let summary = (words, longest).lift(b, |n, l| format!("{n} words, longest: {l:?}"));
         (lines_in, summary)
     });
