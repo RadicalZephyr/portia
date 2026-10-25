@@ -4,6 +4,19 @@
 
 ## Overview
 
+### If FRP means nothing to you
+
+**Portia** is a library that helps you structure your application in the [Boundaries-style
+architecture][gb-boundaries]. It gives you Iterator-like combinators to compose your
+easily unit-testable functional core code into reactive systems, and a compile-time
+checked boundary between that [functional core and the imperative shell][fcis] that drives
+it.
+
+[gb-boundaries]: https://www.destroyallsoftware.com/talks/boundaries
+[fcis]: https://www.destroyallsoftware.com/screencasts/catalog/functional-core-imperative-shell
+
+### If you're familiar with FRP
+
 **Portia** is a modern, idiomatic Rust implementation of **Functional Reactive Programming
 (FRP)** - built to be lightweight, expressive, and easily optimized by the compiler.
 
