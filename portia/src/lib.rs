@@ -57,17 +57,46 @@
 //! }
 //! ```
 //!
+//! Every value a cell holds implements [`Trace`], so the collector
+//! can find any tokens inside it. The standard library's types
+//! already do. For your own state types, turn on the `derive`
+//! feature, `portia = { version = "0.0.1", features = ["derive"] }`,
+//! and add `#[derive(Trace)]`. Wrap a type from another crate in
+//! [`Leaf`] if it never contains tokens, or your own newtype if it
+//! can contain tokens and you need to provide a [`Trace`] impl.
+//!
+//! # Rules for code Portia runs
+//!
+//! Node code, the closures you pass to the graph, and listeners have to
+//! keep to these rules. [`rules`] explains each one.
+//!
+//! - **Don't panic.** Not in node code, a listener or the `Drop` of a
+//!   value the graph holds. A panic poisons the runtime for good: if
+//!   that happens you must drop it and build a new one. Return errors
+//!   as values, in a `Result` or an `Option`, and watch for `unwrap`,
+//!   indexing and integer overflow.
+//! - **Be a function of your inputs.** Mutation inside one call is
+//!   fine.  State carried between calls in a captured `RefCell`
+//!   isn't, put it in a Portia [`Cell`] instead.
+//! - **No effects you rely on.** The engine decides when your closure
+//!   runs and how often.
+//! - **Declare every token a closure captures with
+//!   [`depends`](Builder::depends).** Otherwise its node can be
+//!   collected, and the closure's next use of it panics, in release builds
+//!   too.
+//!
 //! # Status
 //!
 //! This release works and is usable. Nothing is `todo!()`, the examples in
 //! the documentation run, and the guarantees the RFDs make are fixed by
 //! `compile_fail` doc tests.
 //!
-//! An agent wrote it: 0.0.1 is a spike written by Claude, and I'm rewriting
-//! the engine underneath by hand. The tests pin its behavior, hand-made
-//! mutations of the engine show the tests would catch a change in it, and
-//! differential tests against Sodium's denotational semantics, run by GHC
-//! as an oracle, show it's the right behavior.
+//! Version 0.0.1 is a proof-of-concept spike written by Claude, and
+//! I'm rewriting the engine underneath by hand. The tests pin its
+//! behavior, hand-made mutations of the engine show the tests would
+//! catch a change in it, and differential tests against Sodium's
+//! denotational semantics, run by GHC as an oracle, show it's the
+//! right behavior.
 //!
 //! 0.0.1 is a frozen snapshot with no patch releases planned. The next
 //! release is 0.1.0, written by hand, and it aims to keep this API close.
@@ -172,6 +201,7 @@ mod mode;
 pub mod prelude;
 #[cfg(doctest)]
 mod refusals;
+pub mod rules;
 mod runtime;
 #[cfg(any(feature = "std", feature = "critical-section"))]
 mod slot;
