@@ -27,6 +27,10 @@ statistics = []
 # bare-metal target pushes the generic engine through code generation.
 smoke = []
 
+[package.metadata.docs.rs]
+# The crate root tells users to derive `Trace`, so docs.rs shows the derive.
+features = ["derive"]
+
 [dependencies]
 portia-derive = { workspace = true, optional = true }
 critical-section = { workspace = true, optional = true }
