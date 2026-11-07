@@ -9,8 +9,9 @@ use crate::engine::Kind;
 use crate::engine::nodes::read::{ReadFn, ReadNode};
 use crate::engine::nodes::stream::StepsNode;
 use crate::mode::Erase;
-use crate::source::Node;
+use crate::source::{FilterMap, Node, Snapshot, Source};
 use crate::token::{Cell, State, Stream, Token, TokenRef};
+use crate::trace::Trace;
 
 /// Anything that names a cell: a [`Cell`], or a [`State`].
 ///
@@ -237,7 +238,9 @@ impl<A: Clone + 'static> Cell<A> {
     /// an operational situation needs it, such as sending a cell over a wire;
     /// from I/O code, [`Runtime::listen_steps`](crate::Runtime::listen_steps) is
     /// the same view. It does not exist on a [`State`], whose new value does
-    /// not exist until commit.
+    /// not exist until commit. To react to changes of value instead,
+    /// [`calm`](Cell::calm) the cell first: its steps depend only on what
+    /// the cell holds.
     ///
     /// The node clones the value after the instant into its slot. For a
     /// read-through cell that value is computed from its inputs' values
@@ -267,6 +270,67 @@ impl<A: Clone + 'static> Cell<A> {
         C: Builder + Stores<A>,
     {
         Stream::from_token(steps_node::<C, A, true>(self, builder))
+    }
+}
+
+/// The chain inside [`Cell::calm`], with its functions as pointers so that
+/// the builder bound can name it.
+type Calm<A> =
+    FilterMap<Snapshot<Stream<A>, Cell<A>, fn(A, &A) -> Option<A>>, fn(Option<A>) -> Option<A>>;
+
+impl<A: PartialEq + Clone + Trace + 'static> Cell<A> {
+    /// Sodium's `calm`: a cell with this cell's value at every instant,
+    /// which steps only when the value changes. Its [`steps`](Cell::steps)
+    /// are this cell's changes of value, and a
+    /// [`Runtime::listen_cell`](crate::Runtime::listen_cell) on it fires only
+    /// when the value changes.
+    ///
+    /// Each step is compared with the value from before the instant, so a
+    /// step to an equal value doesn't come through, and the result depends
+    /// only on what the cell holds, not on how it was built. That makes it
+    /// safe where `steps` alone isn't. Equality is `PartialEq`, so a value
+    /// that doesn't equal itself, such as an `f64` NaN, steps every time.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use portia::prelude::*;
+    ///
+    /// let mut rt = Runtime::local();
+    /// let (a_in, c_in, parity) = rt.build(|b| {
+    ///     let (a, a_in) = b.input_cell(1u32);
+    ///     let (c, c_in) = b.input_cell(10u32);
+    ///     // The lift steps whenever either input does.
+    ///     let parity = (a, c).lift(b, |a, c| (a + c) % 2).calm(b);
+    ///     (a_in, c_in, parity)
+    /// });
+    /// let seen = Rc::new(RefCell::new(Vec::new()));
+    /// let log = seen.clone();
+    /// let _listener = rt.listen_steps(parity, move |p: &u32| log.borrow_mut().push(*p));
+    /// rt.send(a_in, 3); // 13: still odd
+    /// rt.send(a_in, 4); // 14: even
+    /// rt.send(c_in, 12); // 16: still even
+    /// assert_eq!(*seen.borrow(), [0]);
+    /// ```
+    ///
+    /// It reads this cell's value when it's built, as
+    /// [`sample`](Cell::sample) does, so calming the forward token of a
+    /// [`CellLoop`](crate::CellLoop) that isn't closed yet panics. Calm the
+    /// cell after closing the loop.
+    #[doc(alias = "dedup", alias = "distinct", alias = "changes")]
+    #[track_caller]
+    pub fn calm<C>(self, builder: &mut C) -> Cell<A>
+    where
+        C: Builder + Stores<A> + Stores<Calm<A>>,
+    {
+        let initial = self.sample(builder).clone();
+        let changed: fn(A, &A) -> Option<A> = |new, old| (new != *old).then_some(new);
+        let present: fn(Option<A>) -> Option<A> = |change| change;
+        self.steps(builder)
+            .snapshot(self, changed)
+            .filter_map(present)
+            .hold(builder, initial)
     }
 }
 
