@@ -427,7 +427,9 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     }
 
     /// Merges two streams; `f` combines simultaneous events, with this
-    /// stream's event on the left. Both inputs move through.
+    /// stream's event on the left. It runs only when both streams fire in
+    /// one transaction; otherwise the one event passes through unchanged.
+    /// Both inputs move through.
     #[track_caller]
     fn merge<C, T, F>(self, builder: &mut C, other: T, f: F) -> Stream<Self::Event>
     where

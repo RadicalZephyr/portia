@@ -11,7 +11,8 @@
 //! transaction is a single instant: everything an event causes happens in
 //! that instant, together, so nothing ever sees a half-updated state. A
 //! stream's events happen at an instant, and a cell has a value at every
-//! instant, which events change from one instant to the next. Each piece's
+//! instant, which events change from one instant to the next. When an
+//! event gives a cell a value, even an equal one, the cell steps. Each piece's
 //! meaning is fixed by those rules, so pieces you build and test separately
 //! compose predictably.
 //!
@@ -39,12 +40,14 @@
 //!   for each one.
 //! - A [`Cell`] has a value at every instant, such as the word count so
 //!   far. A [`State`] is a cell updated in place, and you read it the same
-//!   way.
+//!   way, but it has no [`steps`](Cell::steps) or [`calm`](Cell::calm). Use
+//!   `accumulate` rather than `accumulate_mut` for a cell that needs them.
 //! - An [`Input`] is the I/O side of a stream: what you
 //!   [`send`](Runtime::send) to. Each send is a transaction of its own, and
 //!   [`Runtime::transaction`] puts several sends in one.
 //! - A [`Listener`] runs your code with a stream's events or a cell's
-//!   values, after each transaction. Dropping it stops it.
+//!   values, after each transaction. Dropping it stops it, and so does
+//!   `let _ =`, which drops it at once.
 //!
 //! Streams, cells and inputs are small handles, called tokens, that name
 //! parts of the graph. The data itself lives in the runtime, which collects

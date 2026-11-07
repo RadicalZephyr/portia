@@ -101,7 +101,10 @@ pub struct Cell<A> {
 /// [`Runtime`](crate::Runtime) accept either, through
 /// [`CellRef`](crate::CellRef); `map_cell` over a `State` is a `State`, and
 /// so is a `lift` with a `State` among its inputs. What a `State` lacks is
-/// a stream view. `steps` and `steps_with_current` carry a cell's value
+/// a stream view, and so [`calm`](Cell::calm), which is built on one. If
+/// you need either, accumulate with
+/// [`accumulate`](crate::Source::accumulate) instead, which gives a
+/// `Cell`. `steps` and `steps_with_current` carry a cell's value
 /// after the instant, during the instant, and an in-place accumulator's
 /// function runs only at commit, after every reader has seen the state
 /// from before the instant. The listeners read after commit, so

@@ -164,7 +164,7 @@ use portia::prelude::*;
 
 fn main() -> std::io::Result<()> {
     let mut rt = Runtime::local();
-    let _ = rt.build(|b| {
+    rt.build(|b| {
         // FRP code goes here
     });
     // I/O code goes here
@@ -211,6 +211,9 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 ```
+
+The listener only runs while `_listener` is alive. Dropping it stops it, and `let _ =` drops it
+at once, so keep it in a named binding or call `.keep()` on it.
 
 To quickly run this example, clone this repository, and run `cargo run --example word_count_mut`.
 
