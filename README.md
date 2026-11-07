@@ -52,7 +52,7 @@ Portia isn't _just_ FRP though. Portia implements Sodium's denotational semantic
 basically means that each operator has a mathematical definition of what it does and how
 it works when combined with other operators. If the code you run using Portia follows the
 rules, then the meaning of your code and how Portia's FRP engine will run it follows
-directly from the meaning of each of it's parts and your program will behave consistently
+directly from the meaning of each of its parts and your program will behave consistently
 and predictably.
 
 In short: if you're writing long-running, event-driven programs that want to _react_ to
@@ -91,9 +91,10 @@ problems, you might benefit from FRP:
 - Missed first event
 - Messy state: lots of threads or async tasks sharing state with `Rc<Refcell<T>>` or `Arc<Mutex<T>>` everywhere
 - Threading issues: fighting with the compiler about `Send` and/or `Sync` and solving it with `Mutex` everywhere
-- Accidental recursion: getting `BorrowMutError`'s or sporadic deadlocks at runtime
+- Accidental recursion: getting `BorrowMutError`s or sporadic deadlocks at runtime
 - Leaking callbacks: this is less common in Rust because we don't use callbacks a lot
-- Unpredictable event ordering: this is complex enough it gets it's own section below
+- Unpredictable event ordering: handlers run in the order they were registered, not the order
+  their data depends on
 
 For a more thorough explanation of these "six plagues" see [Banishing the Six Plagues][six-plagues].
 
@@ -111,7 +112,7 @@ precisely how they will work together.
 ## Status
 
 Portia v0.0.1 is an initial spike built entirely by an LLM agent to prove the interface
-design is buildable and can be held to the core semantics. It is usable todaay, the code
+design is buildable and can be held to the core semantics. It is usable today, the code
 works, nothing is `todo!()`.
 
 Here's how the spike is checked, where each step covers what the one before leaves open:
@@ -149,6 +150,7 @@ fn main() -> std::io::Result<()> {
         // FRP code goes here
     });
     // I/O code goes here
+    Ok(())
 }
 ```
 
