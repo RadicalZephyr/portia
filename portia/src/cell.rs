@@ -223,6 +223,13 @@ impl<A: Clone + 'static> Cell<A> {
     /// Sodium's `updates`: a stream of this cell's steps, each carrying the
     /// post-instant value, including a step to an equal value.
     ///
+    /// It fires in every instant the cell steps in, including the instant
+    /// that creates it if the cell steps then, as in a
+    /// [`construct`](crate::Source::construct). Unlike
+    /// [`steps_with_current`](Cell::steps_with_current), being created
+    /// isn't a reason to fire: built in `build`, it first fires at the
+    /// cell's first step after that.
+    ///
     /// The Sodium book, section 8.4: "To protect the idea of a continuously
     /// varying cell, a true FRP system must ensure that changes in a cell's
     /// value aren't observable." This stream observes them, and so depends on
