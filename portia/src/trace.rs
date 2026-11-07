@@ -37,8 +37,10 @@ impl Tracer {
     }
 }
 
-/// A value the collector can look inside (RFD 3).
+/// Lets the collector find the tokens inside a value. Every value a cell
+/// holds implements it, and you derive it for your own types.
 ///
+/// It's how the collector looks inside a value (RFD 3).
 /// A node is alive while a root reaches it, and what a stateful cell's
 /// committed value names is what it reaches: a hold of a cell token keeps
 /// that cell alive, a routing table of screens keeps every screen. So the

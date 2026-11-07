@@ -60,22 +60,14 @@ use crate::source::Node;
 use crate::token::{Input, Token};
 use crate::trace::{Trace, Tracer};
 
-/// A graph: the only place transactions run, and the only holder of the
-/// I/O API. It is made empty, with [`local`](Runtime::local) or
+/// Holds the graph and runs it. It's where events enter your program and
+/// results leave it, and each event's consequences arrive together, so
+/// nothing sees a half-updated state.
+///
+/// It is made empty, with [`local`](Runtime::local) or
 /// [`threaded`](Runtime::threaded), and [`build`](Runtime::build) adds
-/// to it, the first time and between any two transactions after.
-///
-/// The graph is entered from exactly one place at a time. Graph code never
-/// holds a `Runtime`; every public entry point checks the
-/// transaction-in-progress flag, so a `Runtime` smuggled into graph code fails
-/// at the entry. The same flag is the poison: only a transaction that
-/// finishes clears it, so an entry that finds it set outside a transaction
-/// reports `Poisoned`. That holds where a panic unwinds and where a panic is
-/// a trap alike, since neither needs code to run on the way out (RFD 5).
-///
-/// `Runtime<Threaded>` is `Send` because every field is: the engine stores
-/// each value, closure and chain in the mode's carrier, which is
-/// `Box<dyn Any + Send>` there. No `unsafe impl` says so.
+/// to it, the first time and between any two transactions after. It's the
+/// only place transactions run, and the only holder of the I/O API.
 ///
 /// # Memory
 ///
@@ -98,6 +90,22 @@ use crate::trace::{Trace, Tracer};
 /// [`Builder::anchor`](crate::Builder::anchor). Collection is automatic by
 /// default, runs after each whole unit, and never inside a transaction; see
 /// [`CollectionPolicy`].
+///
+/// # Poisoning
+///
+/// The graph is entered from exactly one place at a time. Graph code never
+/// holds a `Runtime`; every public entry point checks the
+/// transaction-in-progress flag, so a `Runtime` smuggled into graph code fails
+/// at the entry. The same flag is the poison: only a transaction that
+/// finishes clears it, so an entry that finds it set outside a transaction
+/// reports `Poisoned`. That holds where a panic unwinds and where a panic is
+/// a trap alike, since neither needs code to run on the way out (RFD 5).
+///
+/// # Threads
+///
+/// `Runtime<Threaded>` is `Send` because every field is: the engine stores
+/// each value, closure and chain in the mode's carrier, which is
+/// `Box<dyn Any + Send>` there. No `unsafe impl` says so.
 pub struct Runtime<M: Mode = Local> {
     build: BuildContext<M>,
     /// The build context's count of released guards as the last
@@ -122,14 +130,6 @@ impl Runtime<Local> {
     /// `construct` hands them out.
     pub fn local() -> Self {
         Runtime::empty()
-    }
-
-    /// A handle for I/O code that can't hold the runtime, such as a GTK
-    /// signal handler: every call through it queues for the next
-    /// [`pump`](Runtime::pump). Every `Io` of a runtime shares its one
-    /// queue, made with the runtime, so this takes `&self`.
-    pub fn io(&self) -> Io {
-        Io::new(&self.build.io)
     }
 
     /// Runs an `Io`'s unit as one transaction, which is dropped whole if a
@@ -569,7 +569,11 @@ impl<M: Mode> Runtime<M> {
         Ok(self.transaction(f))
     }
 
-    /// Listens to a materialized node. An affine stream is moved in, so it can
+    /// Listens to a stream: `f` runs with each event, after its transaction.
+    /// A chain of adapters such as `events.map(f)` has to become a node
+    /// first, with [`node`](crate::Source::node), inside the build.
+    ///
+    /// An affine stream is moved in, so it can
     /// be listened to once; a shared stream any number of times. Listeners
     /// take the event by value, have no graph access, and run after commit
     /// on the thread that called `send`, `transaction` or `pump`.
@@ -1110,8 +1114,8 @@ impl<M: Mode> Runtime<M> {
         Ok(self.build.value::<C::Value>(i))
     }
 
-    /// Runs a collection now (RFD 3): frees every node that no root
-    /// reaches, whatever the policy. The call the manual policy runs, at
+    /// Runs a collection now: frees every node that no root reaches,
+    /// whatever the policy (RFD 3). The call the manual policy runs, at
     /// the end of a frame or wherever the driver chooses to pay.
     ///
     /// It marks from the roots, frees what it did not mark, and takes the
@@ -1520,6 +1524,16 @@ impl<M: Mode> Runtime<M> {
     }
 }
 
+impl Runtime<Local> {
+    /// A handle for I/O code that can't hold the runtime, such as a GTK
+    /// signal handler: every call through it queues for the next
+    /// [`pump`](Runtime::pump). Every `Io` of a runtime shares its one
+    /// queue, made with the runtime, so this takes `&self`.
+    pub fn io(&self) -> Io {
+        Io::new(&self.build.io)
+    }
+}
+
 /// When collection runs. It never runs inside a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionPolicy {
@@ -1706,7 +1720,10 @@ impl<M: Mode> Transaction<'_, M> {
     }
 }
 
-/// A listener handle. Dropping it unlistens; it borrows nothing from the
+/// Keeps a listener running. Dropping it stops it, and
+/// [`keep`](Listener::keep) keeps it for the life of the graph.
+///
+/// It borrows nothing from the
 /// graph and shares a count of its owners with its node's entry instead, so
 /// it can be dropped inside a listener, and on any thread where the target
 /// has pointer atomics. Every mode returns the same type.
@@ -1752,10 +1769,12 @@ impl Drop for Listener {
     }
 }
 
-/// The handle that keeps a node alive from I/O code without listening to
-/// it, one of the two kinds of root, from [`Anchored::into_parts`]. Dropping it
-/// removes the root, and the node is collected at a later collection if
-/// nothing else reaches it. It borrows nothing from the graph, and shares a
+/// Keeps part of the graph alive for I/O code that holds its tokens without
+/// listening to them. Dropping it lets that part be collected.
+///
+/// It's one of the two kinds of root, from [`Anchored::into_parts`].
+/// Dropping it removes the root, and the node is collected at a later
+/// collection if nothing else reaches it. It borrows nothing from the graph, and shares a
 /// count of its owners with its entries, as a [`Listener`] does.
 ///
 /// Not `Pin`, which is an unrelated concept in `std::pin`, and not `Root`,

@@ -70,7 +70,15 @@ pub(crate) mod sealed {
     pub trait Sealed {}
 }
 
-/// Anything that yields events: a materialized node or a chain of adapters.
+/// The operations on streams: transforming, filtering, holding, merging and
+/// accumulating them.
+///
+/// Adapters, such as `map` and `filter`, don't add anything to the graph by
+/// themselves. They fuse into the next operation that does, a
+/// *materializer* such as `hold`, `share` or `node`, which takes `b`. A
+/// chain of adapters that no materializer has used yet is not a stream you
+/// can listen to. Anything that yields events implements this trait: a
+/// stream, or such a chain.
 ///
 /// The event is an associated type, the way `Iterator` has `Item`: an adapter
 /// type such as [`Map`] cannot implement a generic `Source<A>`, because `A`
@@ -810,8 +818,9 @@ impl<M: Mode> BuildContext<M> {
     }
 }
 
-/// A materialized node: what [`Runtime::listen`](crate::Runtime::listen) accepts.
-/// Adapter types do not implement it, so a chain cannot be listened to.
+/// A stream you can listen to: a [`Stream`] or a [`Shared`]. A chain of
+/// adapters isn't one until [`node`](Source::node) makes it one, which is
+/// why [`Runtime::listen`](crate::Runtime::listen) takes a `Node`.
 ///
 /// Sealed, with hidden items: a listener reads a node the way its type
 /// says, taking the event from an affine stream and cloning it from a

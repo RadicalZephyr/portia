@@ -102,7 +102,8 @@ impl<E> Plane<E> {
     }
 }
 
-/// What every node-creating operation takes: a [`BuildContext`] of either mode,
+/// Adds inputs, constants and loops to the graph, and declares what keeps
+/// parts of it alive. Every builder has these methods: a [`BuildContext`],
 /// or a [`Portable`] lent by one. Sealed.
 ///
 /// Its public methods are the builder's own operations, `input`,
@@ -226,51 +227,6 @@ pub trait Builder: sealed::Sealed + Sized {
     fn root(&mut self, nodes: Vec<u32>) -> Anchor;
 
     // ----- the builder's own operations, one definition for every builder
-
-    /// Anchors what a build closure or a
-    /// [`construct`](crate::Source::construct) closure sends out to I/O
-    /// code, as [`Runtime::anchor`](crate::Runtime::anchor) does: the
-    /// [`Anchored`] it returns carries the value, and roots every token its
-    /// [`Trace`] finds until the last of its clones drops. A construct that
-    /// returns one sends its row across the boundary already rooted, so the I/O code
-    /// that receives it needn't anchor it.
-    ///
-    /// ```
-    /// use std::cell::RefCell;
-    /// use std::rc::Rc;
-    ///
-    /// use portia::prelude::*;
-    ///
-    /// let mut graph = Runtime::local();
-    /// let (open_in, opened) = graph.build(|b| {
-    ///     let (open, open_in) = b.input::<u32>();
-    ///     let opened = open.construct(b, |b, start| {
-    ///         let (bumps, bumps_in) = b.input::<u32>();
-    ///         let count = bumps.accumulate(b, start, |n, c| c + n);
-    ///         b.anchor((bumps_in, count))
-    ///     });
-    ///     (open_in, opened)
-    /// });
-    /// graph.set_collect_after_every_unit(true); // a test setting
-    /// let received = Rc::new(RefCell::new(Vec::new()));
-    /// let log = received.clone();
-    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
-    /// graph.send(open_in, 10); // the row arrives anchored
-    /// let (bumps_in, count) = *received.borrow()[0];
-    /// graph.send(bumps_in, 5);
-    /// assert_eq!(*graph.sample(count), 15);
-    /// ```
-    fn anchor<T: Trace>(&mut self, value: T) -> Anchored<T> {
-        let mut tracer = Tracer::new();
-        value.trace(&mut tracer);
-        // Every token is checked before any is rooted.
-        let nodes: Vec<u32> = tracer
-            .visited
-            .into_iter()
-            .map(|t| self.check_token(t))
-            .collect();
-        Anchored::new(value, self.root(nodes))
-    }
 
     /// A stream driven from I/O code, and the token that drives it.
     ///
@@ -473,7 +429,7 @@ pub trait Builder: sealed::Sealed + Sized {
     }
 
     /// Declares that `node` keeps alive every token the values in `on`
-    /// hold, for a closure that captures them (RFD 3). Each value is traced,
+    /// hold, for a closure that captures them. Each value is traced (RFD 3),
     /// so a token counts wherever it sits: bare, or in a struct, a tuple or a
     /// collection at any depth. One declaration per closure; the slice is
     /// heterogeneous, and takes references, so an affine stream is not
@@ -548,6 +504,51 @@ pub trait Builder: sealed::Sealed + Sized {
             );
         }
         self.extend_reach(n, reach);
+    }
+
+    /// Anchors what a build closure or a
+    /// [`construct`](crate::Source::construct) closure sends out to I/O
+    /// code, as [`Runtime::anchor`](crate::Runtime::anchor) does: the
+    /// [`Anchored`] it returns carries the value, and roots every token its
+    /// [`Trace`] finds until the last of its clones drops. A construct that
+    /// returns one sends its row across the boundary already rooted, so the I/O code
+    /// that receives it needn't anchor it.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use portia::prelude::*;
+    ///
+    /// let mut graph = Runtime::local();
+    /// let (open_in, opened) = graph.build(|b| {
+    ///     let (open, open_in) = b.input::<u32>();
+    ///     let opened = open.construct(b, |b, start| {
+    ///         let (bumps, bumps_in) = b.input::<u32>();
+    ///         let count = bumps.accumulate(b, start, |n, c| c + n);
+    ///         b.anchor((bumps_in, count))
+    ///     });
+    ///     (open_in, opened)
+    /// });
+    /// graph.set_collect_after_every_unit(true); // a test setting
+    /// let received = Rc::new(RefCell::new(Vec::new()));
+    /// let log = received.clone();
+    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
+    /// graph.send(open_in, 10); // the row arrives anchored
+    /// let (bumps_in, count) = *received.borrow()[0];
+    /// graph.send(bumps_in, 5);
+    /// assert_eq!(*graph.sample(count), 15);
+    /// ```
+    fn anchor<T: Trace>(&mut self, value: T) -> Anchored<T> {
+        let mut tracer = Tracer::new();
+        value.trace(&mut tracer);
+        // Every token is checked before any is rooted.
+        let nodes: Vec<u32> = tracer
+            .visited
+            .into_iter()
+            .map(|t| self.check_token(t))
+            .collect();
+        Anchored::new(value, self.root(nodes))
     }
 }
 

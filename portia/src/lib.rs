@@ -12,7 +12,9 @@
 //! that instant, together, so nothing ever sees a half-updated state. A
 //! stream's events happen at an instant, and a cell has a value at every
 //! instant, which events change from one instant to the next. When an
-//! event gives a cell a value, even an equal one, the cell steps. Each piece's
+//! event gives a cell a value, even an equal one, the cell steps, and the
+//! end of the transaction, when cells take their new values, is its commit.
+//! Each piece's
 //! meaning is fixed by those rules, so pieces you build and test separately
 //! compose predictably.
 //!

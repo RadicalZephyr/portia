@@ -59,9 +59,11 @@ pub(crate) mod sealed {
 /// value that holds tokens, takes a single token too.
 pub trait TokenRef: sealed::Sealed {}
 
-/// An affine stream of events.
+/// A stream of events with one consumer. Using it moves it;
+/// [`share`](crate::Source::share) it to give it more than one.
 ///
-/// A `Stream` has at most one consumer: every constructor takes it by value,
+/// Streams are affine, the type-theory word for this. A `Stream` has at
+/// most one consumer: every constructor takes it by value,
 /// and using it twice is a compile error. To give it more than one consumer,
 /// [`share`](crate::Source::share) it. A toolkit's event becomes a Portia
 /// event when I/O code sends it into an input. The `PhantomData<fn() -> A>` keeps the
@@ -92,9 +94,11 @@ pub struct Cell<A> {
     event: PhantomData<fn() -> A>,
 }
 
-/// A cell whose new value does not exist until commit: the state of an
-/// in-place accumulator, [`accumulate_mut`](crate::Source::accumulate_mut),
-/// and every read-through cell computed from one.
+/// A cell that [`accumulate_mut`](crate::Source::accumulate_mut) updates in
+/// place, or a cell computed from one.
+///
+/// Its new value does not exist until commit: it's the state of an
+/// in-place accumulator, or a read-through cell computed from one.
 ///
 /// A `State` is read like a [`Cell`]. `sample`, `snapshot`, `gate`,
 /// `map_cell`, `lift` and the cell listeners on

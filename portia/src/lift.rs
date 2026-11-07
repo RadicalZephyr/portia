@@ -7,9 +7,11 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// A tuple of two to six cells, which `lift` combines into one read-through
-/// cell with a function over references to all of their values:
+/// Combines two to six cells into one, with a function over their values:
 /// `(price, quantity).lift(b, |p, q| p * q)`.
+///
+/// It's implemented for tuples of cells, and the result is a read-through
+/// cell. The function takes references to all of the values.
 ///
 /// There is no binary method on `Cell`: chaining binary lifts composes
 /// functions rather than lifting three cells, and an intermediate cell would

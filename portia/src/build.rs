@@ -40,10 +40,12 @@ fn next_graph_id() -> u32 {
     id
 }
 
-/// The engine's own builder, for a runtime in mode `M`: it stores
-/// whatever that mode accepts.
+/// The `b` in `rt.build(|b| …)`, which you build the graph with. Its
+/// methods are on [`Builder`](crate::Builder), and the operations on
+/// streams and cells are on [`Source`] and [`Cell`](crate::Cell).
 ///
-/// It exists inside [`Runtime::build`](crate::Runtime::build) and inside
+/// It's the engine's own builder, for a runtime in mode `M`: it stores
+/// whatever that mode accepts. It exists inside [`Runtime::build`](crate::Runtime::build) and inside
 /// [`Source::construct`] closures, and nowhere else. It has no `send` and no
 /// `listen`; I/O lives on [`Runtime`](crate::Runtime).
 ///
