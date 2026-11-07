@@ -1,7 +1,9 @@
 [package]
 name = "portia"
-description = "Lightweight FRP rooted in Rust: a Sodium-semantics engine with a build-time and I/O-time separation."
+description = "Compose your Rust functions and data into a program that reacts to events, with each event's updates applied together and in order."
 readme = "../README.md"
+keywords = ["frp", "reactive", "events", "dataflow", "sodium"]
+categories = ["data-structures", "rust-patterns", "no-std", "embedded"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
