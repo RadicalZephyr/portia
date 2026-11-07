@@ -6,7 +6,25 @@
 
 ### If FRP means nothing to you
 
-**Portia** is a library that helps you structure your application in the [Boundaries-style
+Portia is a library for composing your own Rust data structures and functions into a
+program that reacts to events. It goes on top of the code you already have: your types
+stay your types and your functions stay plain functions. You tell Portia which events feed
+which of your functions, and its engine works out a valid order to compute every update
+in.
+
+Portia has a model of time. Things happen in transactions, and each transaction is a
+single instant: everything an event causes happens in that instant, together, so nothing
+ever sees a half-updated state. A stream's events happen at an instant, and a cell has a
+value at every instant, which events change from one instant to the next. When an event
+gives a cell a value, even an equal one, the cell steps. Each piece's meaning is fixed by
+those rules, so pieces you build and test separately compose predictably.
+
+You describe how events flow once, in a build closure. Then your I/O code drives the graph
+you built: it sends events in and listens to what comes out. The graph does no I/O itself,
+so the same graph runs against stdin or against a test. The example below is the first
+kind.
+
+**Portia** also helps you structure your application in the [Boundaries-style
 architecture][gb-boundaries]. It gives you Iterator-like combinators to compose your
 easily unit-testable functional core code into reactive systems, and a compile-time
 checked boundary between that [functional core and the imperative shell][fcis] that drives
