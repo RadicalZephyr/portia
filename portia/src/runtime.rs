@@ -1719,6 +1719,7 @@ impl<M: Mode> Transaction<'_, M> {
 /// [`listen_once`](Runtime::listen_once) listener is spent when it fires:
 /// its root goes then, and counts as released then, and its handle does
 /// nothing after.
+#[must_use = "dropping a `Listener` stops it; keep it alive, or call `.keep()`"]
 pub struct Listener {
     /// The handle's share of the state its node's entry holds; `None` once
     /// kept.
@@ -1759,6 +1760,7 @@ impl Drop for Listener {
 ///
 /// Not `Pin`, which is an unrelated concept in `std::pin`, and not `Root`,
 /// which is the concept this is one kind of.
+#[must_use = "dropping an `Anchor` releases its root; keep it alive, or call `.keep()`"]
 pub struct Anchor {
     /// The handle's share of the state its entries hold; `None` once kept.
     alive: Option<Liveness>,
