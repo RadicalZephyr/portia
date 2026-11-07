@@ -1,9 +1,9 @@
 name: Book
 
+# Builds and link-checks the book on pull requests. 0.0.1 ships without a
+# book, so tags don't deploy it; add `push: tags: ["v*"]` back for 0.1.0.
 on:
   pull_request:
-  push:
-    tags: ["v*"]
 
 permissions:
   contents: read
