@@ -1,16 +1,54 @@
 //! Lightweight Functional Reactive Programming, spun from Rust.
 //!
-//! Portia implements the Sodium FRP denotational semantics with an API that
-//! separates building FRP logic from driving it with I/O.
+//! Portia is a library for composing your own Rust data structures and
+//! functions into a program that reacts to events. It goes on top of the
+//! code you already have: your types stay your types and your functions
+//! stay plain functions. You tell Portia which events feed which of your
+//! functions, and its engine works out a valid order to compute every
+//! update in.
 //!
-//! Building needs a [`Builder`]: a [`BuildContext`], which only exists
-//! inside a [`Runtime::build`] closure and inside [`Source::construct`]
-//! closures, or the one a [`Portable`] lends. Driving lives on [`Runtime`]:
-//! sending, listening and sampling from outside. A runtime starts empty,
-//! from [`Runtime::local`] or [`Runtime::threaded`], and you can build on it
-//! between transactions.
+//! Portia has a model of time. Things happen in transactions, and each
+//! transaction is a single instant: everything an event causes happens in
+//! that instant, together, so nothing ever sees a half-updated state. A
+//! stream's events happen at an instant, and a cell has a value at every
+//! instant, which events change from one instant to the next. Each piece's
+//! meaning is fixed by those rules, so pieces you build and test separately
+//! compose predictably.
 //!
-//! The design is recorded in the RFDs at <https://github.com/portia-rs/rfd>.
+//! You describe how events flow once, in a build closure. Then your I/O
+//! code drives the graph you built: it sends events in and listens to what
+//! comes out. The graph does no I/O itself, so the same graph runs against
+//! stdin or against a test. The example below is the second kind.
+//!
+//! If you know FRP: Portia implements Sodium's denotational semantics, with
+//! an API that separates building FRP logic from driving it with I/O. The
+//! design is recorded in the RFDs at <https://github.com/portia-rs/rfd>.
+//!
+//! # The pieces
+//!
+//! - [`Runtime`] holds the graph. It's where events enter your program and
+//!   results leave it, and dropping it shuts everything down.
+//! - The build closure you pass to [`Runtime::build`] is where you add to
+//!   the graph. Its argument, `b`, is a [`BuildContext`], and a method that
+//!   takes `b` adds a node. A part of a graph is an ordinary function that
+//!   takes `b` and returns tokens, so you combine Portia programs the way
+//!   you combine any other functions.
+//! - A [`Stream`] is events that happen at an instant: each line read, each
+//!   click. A stream has one consumer. [`share`](Source::share) it to get a
+//!   [`Shared`], which takes any number of consumers and clones each event
+//!   for each one.
+//! - A [`Cell`] has a value at every instant, such as the word count so
+//!   far. A [`State`] is a cell updated in place, and you read it the same
+//!   way.
+//! - An [`Input`] is the I/O side of a stream: what you
+//!   [`send`](Runtime::send) to. Each send is a transaction of its own, and
+//!   [`Runtime::transaction`] puts several sends in one.
+//! - A [`Listener`] runs your code with a stream's events or a cell's
+//!   values, after each transaction. Dropping it stops it.
+//!
+//! Streams, cells and inputs are small handles, called tokens, that name
+//! parts of the graph. The data itself lives in the runtime, which collects
+//! the parts nothing uses any more.
 //!
 //! # Example
 //!
