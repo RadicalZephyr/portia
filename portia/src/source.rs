@@ -217,12 +217,15 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         Cell::from_token(builder.token_of(n))
     }
 
-    /// Sodium's `accum`: `hold initial (snapshot f self cell)`, with `f`
-    /// reading the state by reference and returning the new state.
+    /// Keeps a running state: `f` takes each event and the current state by
+    /// reference, and returns the new state, which the cell holds.
     ///
     /// The cell being snapshotted is the result itself, so `f` reads the
     /// accumulator's value from before the instant, as every reader in the
     /// transaction does.
+    ///
+    /// Sodium calls this `accum`: `hold initial (snapshot f self cell)`.
+    #[doc(alias = "accum")]
     #[track_caller]
     fn accumulate<C, S, F>(self, builder: &mut C, initial: S, f: F) -> Cell<S>
     where
@@ -296,8 +299,9 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         State::from_token(builder.token_of(n))
     }
 
-    /// Sodium's `collect`, `Iterator::scan`: a running state and an output
-    /// per event.
+    /// Keeps a running state and emits an output for each event, like
+    /// `Iterator::scan`: `f` takes the event and the state, and returns the
+    /// output and the new state.
     ///
     /// The state is private to the node and is updated when the node runs,
     /// at most once per transaction, so `f` always reads the state from
@@ -315,6 +319,9 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let _numbered = numbers.scan(b, 0u32, |n, k| (Rc::new(n), k + 1)); // error: Rc is not Send
     /// });
     /// ```
+    ///
+    /// Sodium calls this `collect`.
+    #[doc(alias = "collect")]
     #[track_caller]
     fn scan<C, S, B, F>(self, builder: &mut C, initial: S, f: F) -> Stream<B>
     where
@@ -623,9 +630,9 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
         Stream::from_token(builder.token_of(output))
     }
 
-    /// The semantics' `Execute`: runs `f` at each event with a builder of
-    /// the kind `builder` is, so graph can be constructed during a
-    /// transaction. Its results
+    /// Runs `f` at each event with a builder, so it can add to the graph in
+    /// the middle of a transaction. The builder is of the kind `builder` is.
+    /// Its results
     /// are ordinary events: tokens on their way to a hold and a
     /// [`Cell::switch_stream`] or [`Cell::switch_cell`], or plain values.
     ///
@@ -704,6 +711,8 @@ pub trait Source: Sized + 'static + sealed::Sealed + Trace {
     ///     let _made = numbers.construct(b, |_, n| Rc::new(n)); // error: Rc is not Send
     /// });
     /// ```
+    ///
+    /// The semantics call this `Execute`.
     #[track_caller]
     fn construct<C, B, F>(self, builder: &mut C, f: F) -> Stream<B>
     where

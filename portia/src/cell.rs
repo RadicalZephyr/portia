@@ -221,8 +221,8 @@ impl<A: 'static> Cell<A> {
 }
 
 impl<A: Clone + 'static> Cell<A> {
-    /// Sodium's `updates`: a stream of this cell's steps, each carrying the
-    /// post-instant value, including a step to an equal value.
+    /// A stream that fires each time this cell steps, carrying the value
+    /// after the instant, even when it equals the old one.
     ///
     /// It fires in every instant the cell steps in, including the instant
     /// that creates it if the cell steps then, as in a
@@ -247,6 +247,9 @@ impl<A: Clone + 'static> Cell<A> {
     /// after the instant and kept, and at commit it becomes the cell's
     /// memo, so the cell's function runs once per step, however many steps
     /// views and listeners the cell has.
+    ///
+    /// Sodium calls this `updates`.
+    #[doc(alias = "updates")]
     #[track_caller]
     pub fn steps<C>(self, builder: &mut C) -> Stream<A>
     where
@@ -255,15 +258,18 @@ impl<A: Clone + 'static> Cell<A> {
         Stream::from_token(steps_node::<C, A, false>(self, builder))
     }
 
-    /// Sodium's `value`: fires once at its creation instant with the
-    /// post-instant value, then on every step like [`steps`](Cell::steps),
-    /// with the same warning. From I/O code,
+    /// Like [`steps`](Cell::steps), but it also fires once at its creation
+    /// instant, with the cell's value after that instant. The same warning
+    /// applies. From I/O code,
     /// [`Runtime::listen_cell`](crate::Runtime::listen_cell) is the same view.
     ///
     /// Built in a build closure, it fires in the build's transaction, so a
     /// hold built there over it starts at the cell's value. A creation
     /// and a step in one instant are one event, carrying the value after
     /// the step.
+    ///
+    /// Sodium calls this `value`.
+    #[doc(alias = "value")]
     #[track_caller]
     pub fn steps_with_current<C>(self, builder: &mut C) -> Stream<A>
     where
@@ -279,7 +285,7 @@ type Calm<A> =
     FilterMap<Snapshot<Stream<A>, Cell<A>, fn(A, &A) -> Option<A>>, fn(Option<A>) -> Option<A>>;
 
 impl<A: PartialEq + Clone + Trace + 'static> Cell<A> {
-    /// Sodium's `calm`: a cell with this cell's value at every instant,
+    /// A cell with this cell's value at every instant,
     /// which steps only when the value changes. Its [`steps`](Cell::steps)
     /// are this cell's changes of value, and a
     /// [`Runtime::listen_cell`](crate::Runtime::listen_cell) on it fires only
@@ -318,6 +324,8 @@ impl<A: PartialEq + Clone + Trace + 'static> Cell<A> {
     /// [`sample`](Cell::sample) does, so calming the forward token of a
     /// [`CellLoop`](crate::CellLoop) that isn't closed yet panics. Calm the
     /// cell after closing the loop.
+    ///
+    /// Sodium calls this `calm` too.
     #[doc(alias = "dedup", alias = "distinct", alias = "changes")]
     #[track_caller]
     pub fn calm<C>(self, builder: &mut C) -> Cell<A>
@@ -356,8 +364,9 @@ where
 }
 
 impl<A: 'static> Cell<Cell<A>> {
-    /// Sodium's `switchC`: the cell that the outer cell currently selects,
-    /// read through on read. Its one piece of state is the inner it depends
+    /// A cell that follows whichever cell the outer cell holds, switching
+    /// when the outer one steps. It reads through to the selected cell on
+    /// read. Its one piece of state is the inner it depends
     /// on, relinked at commit whenever the outer steps; it steps at creation
     /// and at every switch instant, even when the new inner is quiet.
     ///
@@ -413,6 +422,9 @@ impl<A: 'static> Cell<Cell<A>> {
     /// may be a loop that is not closed yet. Its first link and every move
     /// to another inner check that no cycle forms, and one that does is a
     /// panic that poisons the graph, naming the cycle's nodes.
+    ///
+    /// Sodium calls this `switchC`.
+    #[doc(alias = "switchC")]
     #[track_caller]
     pub fn switch_cell<C: Builder>(self, builder: &mut C) -> Cell<A> {
         Cell::from_token(builder.make_switch_cell::<Cell<A>>(self.token))
@@ -459,9 +471,9 @@ where
     S: Node + 'static,
     S::Event: 'static,
 {
-    /// Sodium's `switchS`: the events of the stream the cell selected
-    /// before the instant. A cell holding affine streams may have at most
-    /// one switch; a second is a build-time error.
+    /// The events of whichever stream the cell held before the instant. A
+    /// cell holding affine streams may have at most one switch; a second is
+    /// a build-time error.
     ///
     /// A selection takes effect after its instant: at the instant the cell
     /// steps, the old stream's event comes through and the new one's does
@@ -549,6 +561,9 @@ where
     ///     let _events = selected.switch_stream(b); // error: Rc is not Send
     /// });
     /// ```
+    ///
+    /// Sodium calls this `switchS`.
+    #[doc(alias = "switchS")]
     #[track_caller]
     pub fn switch_stream<C>(self, builder: &mut C) -> Stream<S::Event>
     where
