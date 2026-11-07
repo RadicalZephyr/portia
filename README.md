@@ -19,10 +19,10 @@ value at every instant, which events change from one instant to the next. When a
 gives a cell a value, even an equal one, the cell steps. Each piece's meaning is fixed by
 those rules, so pieces you build and test separately compose predictably.
 
-You describe how events flow once, in a build closure. Then your I/O code drives the graph
-you built: it sends events in and listens to what comes out. The graph does no I/O itself,
-so the same graph runs against stdin or against a test. The example below is the first
-kind.
+You describe how events flow in a build closure, and the graph can grow and change as
+events arrive. Then your I/O code drives the graph you built: it sends events in and
+listens to what comes out. The graph does no I/O itself, so the same graph runs against
+real inputs or against a test. The example below is the first kind.
 
 **Portia** also helps you structure your application in the [Boundaries-style
 architecture][gb-boundaries]. It gives you Iterator-like combinators to compose your
@@ -110,7 +110,7 @@ problems, you might benefit from FRP:
 - Messy state: lots of threads or async tasks sharing state with `Rc<Refcell<T>>` or `Arc<Mutex<T>>` everywhere
 - Threading issues: fighting with the compiler about `Send` and/or `Sync` and solving it with `Mutex` everywhere
 - Accidental recursion: getting `BorrowMutError`s or sporadic deadlocks at runtime
-- Leaking callbacks: this is less common in Rust because we don't use callbacks a lot
+- Leaking callbacks
 - Unpredictable event ordering: handlers run in the order they were registered, not the order
   their data depends on
 

@@ -14,14 +14,14 @@
 //! instant, which events change from one instant to the next. When an
 //! event gives a cell a value, even an equal one, the cell steps, and the
 //! end of the transaction, when cells take their new values, is its commit.
-//! Each piece's
-//! meaning is fixed by those rules, so pieces you build and test separately
-//! compose predictably.
+//! Each piece's meaning is fixed by those rules, so pieces you
+//! build and test separately compose predictably.
 //!
-//! You describe how events flow once, in a build closure. Then your I/O
-//! code drives the graph you built: it sends events in and listens to what
-//! comes out. The graph does no I/O itself, so the same graph runs against
-//! stdin or against a test. The example below is the second kind.
+//! You describe how events flow in a build closure, and the graph can grow
+//! and change as events arrive. Then your I/O code drives the graph you
+//! built: it sends events in and listens to what comes out. The graph does
+//! no I/O itself, so the same graph runs against real inputs or against a
+//! test. The example below is the second kind.
 //!
 //! If you know FRP: Portia implements Sodium's denotational semantics, with
 //! an API that separates building FRP logic from driving it with I/O. The
@@ -99,6 +99,20 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Why there's a collector
+//!
+//! A graph can change while it runs: [`construct`](Source::construct) adds
+//! to it as events arrive, and a switch moves between parts of it. Some
+//! parts only matter in certain states of your program, like a screen
+//! that's no longer shown or a connection that's closed. Because the graph
+//! records what depends on what, Portia can tell when a part can no longer
+//! affect anything you observe, because no listener and nothing your I/O
+//! code holds depends on it. It frees those parts, so they stop doing work.
+//! Finding them means tracing from what's still observed, which is what a
+//! garbage collector does. Tokens are `Copy` handles rather than owners,
+//! and graphs can contain loops, so reference counting couldn't do it. A
+//! graph you build once and keep never notices any of this.
 //!
 //! Every value a cell holds implements [`Trace`], so the collector
 //! can find any tokens inside it. The standard library's types
