@@ -1,0 +1,1065 @@
+//! Streams as chains and nodes (RFD 4).
+//!
+//! Adapters transform events and take no builder; each returns its adapter
+//! type, which is itself a [`Source`]. A chain is a sequence of
+//! adapters with no materializer. Materializers take a builder and
+//! create exactly one node from a chain, fusing its adapters into that
+//! node's closure. A chain is affine: it is consumed by the first
+//! materializer, and using it twice is a compile error.
+//!
+//! ```
+//! use portia::prelude::*;
+//!
+//! let mut graph = Runtime::local();
+//! let total = graph.build(|b| {
+//!     let (numbers, _numbers_in) = b.input::<u32>();
+//!     let (limit, _limit_in) = b.input_cell(10u32);
+//!     numbers
+//!         .map(|n| n * 2)                 // an adapter: no node, no builder
+//!         .filter(|n| *n > 2)             // another adapter
+//!         .snapshot(limit, |n, l| n.min(*l))
+//!         .hold(b, 0u32)                  // one node for the whole chain
+//! });
+//! ```
+//!
+//! A chain used twice does not compile:
+//!
+//! ```compile_fail,E0382
+//! use portia::prelude::*;
+//!
+//! let mut graph = Runtime::local();
+//! let _ = graph.build(|b| {
+//!     let (numbers, _in) = b.input::<u32>();
+//!     let doubled = numbers.map(|n| n * 2);
+//!     let a = doubled.hold(b, 0u32);
+//!     let b2 = doubled.hold(b, 0u32); // error: use of moved value
+//! });
+//! ```
+//!
+//! A chain runs only inside its node. The hidden method that pulls it takes
+//! a context graph code cannot name or construct:
+//!
+//! ```compile_fail,E0433
+//! use portia::prelude::*;
+//!
+//! let mut graph = Runtime::local();
+//! let _ = graph.build(|b| {
+//!     let (mut numbers, _in) = b.input::<u32>();
+//!     let _ = numbers.pull(&mut portia::Cx::new(b)); // error: no `Cx` in `portia`
+//! });
+//! ```
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+use crate::BuildContext;
+use crate::builder::{AllOps, Builder, Plane, Stores};
+use crate::cell::CellRef;
+use crate::engine::nodes::cell::{AccumulateNode, HoldNode, InPlaceNode, ScanNode};
+use crate::engine::nodes::split::{DeferNode, SplitNode};
+use crate::engine::nodes::stream::{
+    ChainNode, FirstHalf, MergeNode, SecondHalf, SlotNode, UnzipNode,
+};
+use crate::engine::{COMMITS, Cx, Kind};
+use crate::mode::{Erase, Mode};
+use crate::token::{Cell, Shared, State, Stream, Token};
+use crate::trace::{Trace, Tracer};
+
+pub(crate) mod sealed {
+    /// Implemented by the two node types and the adapter types.
+    pub trait Sealed {}
+}
+
+/// The operations on streams: transforming, filtering, holding, merging and
+/// accumulating them.
+///
+/// Adapters, such as `map` and `filter`, don't add anything to the graph by
+/// themselves. They fuse into the next operation that does, a
+/// *materializer* such as `hold`, `share` or `node`, which takes `b`. A
+/// chain of adapters that no materializer has used yet is not a stream you
+/// can listen to. Anything that yields events implements this trait: a
+/// stream, or such a chain.
+///
+/// The event is an associated type, the way `Iterator` has `Item`: an adapter
+/// type such as [`Map`] cannot implement a generic `Source<A>`, because `A`
+/// would appear only in its bounds. `Source<Event = Click>` reads as "a source
+/// of click events".
+///
+/// Sealed, and `'static`: a materializer stores the chain itself in its node
+/// and runs it through the hidden methods, so every adapter must be the
+/// crate's own.
+///
+/// A chain is [`Trace`]. It visits the tokens its adapters hold, the cells
+/// `snapshot` and `gate` read and the value of `map_to`, and ends at its
+/// source token. A materializer
+/// traces the chain once, when it builds the node: what the trace finds
+/// besides the dependency is the node's reach (RFD 3), since the chain never
+/// changes after it is built. A closure is opaque to the trace, so a token a
+/// closure captures is declared with [`Builder::depends`](crate::Builder::depends).
+pub trait Source: Sized + 'static + sealed::Sealed + Trace {
+    /// The type of each event.
+    type Event;
+
+    /// The one node this chain reads events from: its dependency.
+    #[doc(hidden)]
+    fn dependency(&self) -> Token;
+
+    /// Runs the fused chain for this instant: reads the dependency's slot,
+    /// taking the event from an affine stream and cloning it from a shared
+    /// one, and applies every adapter. `None` when nothing fires.
+    #[doc(hidden)]
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<Self::Event>;
+
+    // ----- adapters: no node, no builder -----
+
+    /// Transforms each event, taking it by value.
+    fn map<B, F>(self, f: F) -> Map<Self, F>
+    where
+        F: Fn(Self::Event) -> B + 'static,
+    {
+        Map { source: self, f }
+    }
+
+    /// Keeps the events the predicate accepts.
+    fn filter<P>(self, predicate: P) -> Filter<Self, P>
+    where
+        P: Fn(&Self::Event) -> bool + 'static,
+    {
+        Filter {
+            source: self,
+            predicate,
+        }
+    }
+
+    /// Maps and filters in one step. Sodium's `filterOptional` is
+    /// `filter_map(|o| o)`.
+    fn filter_map<B, F>(self, f: F) -> FilterMap<Self, F>
+    where
+        F: Fn(Self::Event) -> Option<B> + 'static,
+    {
+        FilterMap { source: self, f }
+    }
+
+    /// Replaces each event with a clone of one value.
+    ///
+    /// The chain keeps the value for as long as its node lives, so the value
+    /// is [`Trace`], like every value the graph keeps: the node is traced
+    /// when it is built, and a token in the value is in its reach, with no
+    /// declaration (RFD 3). A foreign type that holds no tokens goes in a
+    /// [`Leaf`](crate::Leaf); one that is not `Trace` does not compile:
+    ///
+    /// ```compile_fail,E0277
+    /// use portia::prelude::*;
+    ///
+    /// #[derive(Clone)]
+    /// struct Label(&'static str);
+    ///
+    /// let mut graph = Runtime::local();
+    /// let _ = graph.build(|b| {
+    ///     let (clicks, _clicks_in) = b.input::<()>();
+    ///     let _ = clicks.map_to(Label("clicked")).node(b); // error: Label is not Trace
+    /// });
+    /// ```
+    fn map_to<B>(self, value: B) -> MapTo<Self, B>
+    where
+        B: Clone + Trace + 'static,
+    {
+        MapTo {
+            source: self,
+            value,
+        }
+    }
+
+    /// Combines each event with the value the cell had at the start of the
+    /// transaction. The cell is a [`Cell`] or a [`State`].
+    fn snapshot<C, B, F>(self, cell: C, f: F) -> Snapshot<Self, C, F>
+    where
+        C: CellRef,
+        F: Fn(Self::Event, &C::Value) -> B + 'static,
+    {
+        Snapshot {
+            source: self,
+            cell,
+            f,
+        }
+    }
+
+    /// Keeps the events during which the cell is `true`. The cell is a
+    /// [`Cell`] or a [`State`].
+    fn gate<C>(self, cell: C) -> Gate<Self, C>
+    where
+        C: CellRef<Value = bool>,
+    {
+        Gate { source: self, cell }
+    }
+
+    /// Keeps only the first event.
+    ///
+    /// Its state lives in the fused chain and is set during evaluation. A
+    /// chain runs at most once per transaction, so that cannot be told from
+    /// setting it at commit.
+    fn once(self) -> Once<Self> {
+        Once {
+            source: self,
+            done: false,
+        }
+    }
+
+    // ----- materializers: one node, a builder -----
+
+    /// A cell that holds the latest event, starting at `initial`.
+    ///
+    /// The hold is the chain's sole consumer and moves the event into its
+    /// committed value at commit, so no `Clone` is needed.
+    #[track_caller]
+    fn hold<C>(self, builder: &mut C, initial: Self::Event) -> Cell<Self::Event>
+    where
+        C: Builder + Stores<Self> + Stores<Self::Event>,
+        Self::Event: Trace + 'static,
+    {
+        let (dependency, cells) = builder.reach_of(&self);
+        let data = Plane::Cell(<C as Stores<Self::Event>>::erase(Erase::Cell(initial)));
+        let parts: Box<[C::Erased]> = Box::new([<C as Stores<Self>>::erase(Erase::Value(self))]);
+        let n =
+            builder.make::<HoldNode<Self>>(Kind::Hold, data, parts, &[dependency], COMMITS, cells);
+        Cell::from_token(builder.token_of(n))
+    }
+
+    /// Keeps a running state: `f` takes each event and the current state by
+    /// reference, and returns the new state, which the cell holds.
+    ///
+    /// The cell being snapshotted is the result itself, so `f` reads the
+    /// accumulator's value from before the instant, as every reader in the
+    /// transaction does.
+    ///
+    /// Sodium calls this `accum`: `hold initial (snapshot f self cell)`.
+    #[doc(alias = "accum")]
+    #[track_caller]
+    fn accumulate<C, S, F>(self, builder: &mut C, initial: S, f: F) -> Cell<S>
+    where
+        C: Builder + Stores<Self> + Stores<S> + Stores<F>,
+        S: Trace + 'static,
+        F: Fn(Self::Event, &S) -> S + 'static,
+    {
+        let (dependency, cells) = builder.reach_of(&self);
+        let data = Plane::Cell(<C as Stores<S>>::erase(Erase::Cell(initial)));
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<F>>::erase(Erase::Value(f)),
+        ]);
+        let n = builder.make::<AccumulateNode<Self, S, F>>(
+            Kind::Hold,
+            data,
+            parts,
+            &[dependency],
+            COMMITS,
+            cells,
+        );
+        Cell::from_token(builder.token_of(n))
+    }
+
+    /// In-place accumulation: `f` mutates the state at commit, after every
+    /// reader in the transaction has seen the previous state.
+    ///
+    /// Observationally the same as [`accumulate`](Source::accumulate), and a
+    /// `Vec` accumulator becomes a push. The result is a [`State`], which
+    /// every cell reader accepts and which has no stream view, since the new
+    /// state does not exist until commit. The event waits for commit in the
+    /// node, so the mode must accept its type; a `Threaded` graph refuses an
+    /// `Rc` event here:
+    ///
+    /// ```compile_fail,E0277
+    /// use portia::prelude::*;
+    /// use std::rc::Rc;
+    ///
+    /// let _ = Runtime::threaded().build(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _count = numbers
+    ///         .map(Rc::new)
+    ///         .accumulate_mut(b, 0u32, |_, n: &mut u32| *n += 1); // error: Rc is not Send
+    /// });
+    /// ```
+    #[track_caller]
+    fn accumulate_mut<C, S, F>(self, builder: &mut C, initial: S, f: F) -> State<S>
+    where
+        C: Builder + Stores<Self> + Stores<S> + Stores<F> + Stores<Self::Event>,
+        S: Trace + 'static,
+        F: FnMut(Self::Event, &mut S) + 'static,
+        Self::Event: 'static,
+    {
+        let (dependency, cells) = builder.reach_of(&self);
+        let data = Plane::InPlace {
+            state: <C as Stores<S>>::erase(Erase::Value(initial)),
+            pending: <C as Stores<Self::Event>>::erase(Erase::Slot),
+        };
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<F>>::erase(Erase::Value(f)),
+        ]);
+        let n = builder.make::<InPlaceNode<Self, S, F>>(
+            Kind::InPlace,
+            data,
+            parts,
+            &[dependency],
+            COMMITS,
+            cells,
+        );
+        State::from_token(builder.token_of(n))
+    }
+
+    /// Keeps a running state and emits an output for each event, like
+    /// `Iterator::scan`: `f` takes the event and the state, and returns the
+    /// output and the new state.
+    ///
+    /// The state is private to the node and is updated when the node runs,
+    /// at most once per transaction, so `f` always reads the state from
+    /// before the instant, as the semantics' snapshot of a hold would.
+    ///
+    /// The output goes in the node's slot, so the mode must accept its
+    /// type; a `Threaded` graph refuses an `Rc` output here:
+    ///
+    /// ```compile_fail,E0277
+    /// use portia::prelude::*;
+    /// use std::rc::Rc;
+    ///
+    /// let _ = Runtime::threaded().build(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _numbered = numbers.scan(b, 0u32, |n, k| (Rc::new(n), k + 1)); // error: Rc is not Send
+    /// });
+    /// ```
+    ///
+    /// Sodium calls this `collect`.
+    #[doc(alias = "collect")]
+    #[track_caller]
+    fn scan<C, S, B, F>(self, builder: &mut C, initial: S, f: F) -> Stream<B>
+    where
+        C: Builder + Stores<Self> + Stores<S> + Stores<F> + Stores<B>,
+        S: Trace + 'static,
+        B: 'static,
+        F: Fn(Self::Event, &S) -> (B, S) + 'static,
+    {
+        let (dependency, cells) = builder.reach_of(&self);
+        let data = Plane::Slot(<C as Stores<B>>::erase(Erase::Slot));
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<F>>::erase(Erase::Value(f)),
+            <C as Stores<S>>::erase(Erase::Value(initial)),
+        ]);
+        let n = builder.make::<ScanNode<Self, S, B, F>>(
+            Kind::Stream,
+            data,
+            parts,
+            &[dependency],
+            0,
+            cells,
+        );
+        Stream::from_token(builder.token_of(n))
+    }
+
+    /// Explicit fan-out: a stream with any number of consumers, each of which
+    /// clones the event. This and `map_to` are the only places `Clone` is
+    /// required of a stream's events.
+    #[track_caller]
+    fn share<C>(self, builder: &mut C) -> Shared<Self::Event>
+    where
+        C: Builder + Stores<Self> + Stores<Self::Event>,
+        Self::Event: Clone + 'static,
+    {
+        Shared::from_token(chain_node(self, builder))
+    }
+
+    /// Materializes a chain as an affine stream with an identity of its own,
+    /// so it can be stored in a value or returned from build.
+    ///
+    /// The node's slot keeps an event nobody consumed between transactions,
+    /// so the mode must accept the event type; a `Threaded` graph refuses a
+    /// stream of `Rc`s here:
+    ///
+    /// ```compile_fail,E0277
+    /// use portia::prelude::*;
+    /// use std::rc::Rc;
+    ///
+    /// let _ = Runtime::threaded().build(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _stream = numbers.map(Rc::new).node(b); // error: Rc is not Send
+    /// });
+    /// ```
+    #[track_caller]
+    fn node<C>(self, builder: &mut C) -> Stream<Self::Event>
+    where
+        C: Builder + Stores<Self> + Stores<Self::Event>,
+        Self::Event: 'static,
+    {
+        Stream::from_token(chain_node(self, builder))
+    }
+
+    /// Splits a stream of pairs into two affine streams, without cloning
+    /// either half: each pair's halves move apart, the first into one
+    /// stream and the second into the other, in the same instant. It
+    /// denotes two maps, one taking each half.
+    ///
+    /// It's the `Clone`-free way to give a pair's halves different
+    /// consumers. A `construct` can make a screen and its input together,
+    /// and then the screens go into a hold for a `switch_stream`, and the
+    /// inputs go out to I/O code, anchored (RFD 4). Each half is a node, as
+    /// [`node`](Source::node) makes, with one consumer.
+    ///
+    /// Each pair waits in a node's slot for its halves to be taken, so the
+    /// mode must accept both; a `Threaded` graph refuses a pair holding an
+    /// `Rc`:
+    ///
+    /// ```compile_fail,E0277
+    /// use portia::prelude::*;
+    /// use std::rc::Rc;
+    ///
+    /// let _ = Runtime::threaded().build(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _halves = numbers.map(|n| (Rc::new(n), n)).unzip(b); // error: Rc is not Send
+    /// });
+    /// ```
+    #[track_caller]
+    fn unzip<C, A, B>(self, builder: &mut C) -> (Stream<A>, Stream<B>)
+    where
+        Self: Source<Event = (A, B)>,
+        C: Builder + Stores<Self> + Stores<(Option<A>, Option<B>)> + Stores<A> + Stores<B>,
+        A: 'static,
+        B: 'static,
+    {
+        let (dependency, cells) = builder.reach_of(&self);
+        let data = Plane::Slot(<C as Stores<(Option<A>, Option<B>)>>::erase(Erase::Slot));
+        let parts: Box<[C::Erased]> = Box::new([<C as Stores<Self>>::erase(Erase::Value(self))]);
+        let pairs = builder.make::<UnzipNode<Self, A, B>>(
+            Kind::Stream,
+            data,
+            parts,
+            &[dependency],
+            0,
+            cells,
+        );
+        let first = half_node::<C, A, FirstHalf<A, B>>(builder, pairs);
+        let second = half_node::<C, B, SecondHalf<A, B>>(builder, pairs);
+        (Stream::from_token(first), Stream::from_token(second))
+    }
+
+    /// Merges two streams; `f` combines simultaneous events, with this
+    /// stream's event on the left. It runs only when both streams fire in
+    /// one transaction; otherwise the one event passes through unchanged.
+    /// Both inputs move through.
+    #[track_caller]
+    fn merge<C, T, F>(self, builder: &mut C, other: T, f: F) -> Stream<Self::Event>
+    where
+        C: Builder + Stores<Self> + Stores<T> + Stores<F> + Stores<Self::Event>,
+        T: Source<Event = Self::Event>,
+        F: Fn(Self::Event, Self::Event) -> Self::Event + 'static,
+        Self::Event: 'static,
+    {
+        let f = <C as Stores<F>>::erase(Erase::Value(f));
+        merge_node::<C, Self, T, F>(self, builder, other, f)
+    }
+
+    /// Merges two streams, this stream winning when both fire.
+    #[track_caller]
+    fn or_else<C, T>(self, builder: &mut C, other: T) -> Stream<Self::Event>
+    where
+        C: Builder + Stores<Self> + Stores<T> + Stores<Self::Event>,
+        T: Source<Event = Self::Event>,
+        Self::Event: 'static,
+    {
+        // An engine-made function pointer is `Send` whatever the event type.
+        let left: fn(Self::Event, Self::Event) -> Self::Event = |left, _| left;
+        merge_node::<C, Self, T, fn(Self::Event, Self::Event) -> Self::Event>(
+            self,
+            builder,
+            other,
+            C::erase_send(left),
+        )
+    }
+
+    /// Emits the elements of each event in child transactions: element n
+    /// of an event at transaction t in the child transaction `t ++ [n]`.
+    ///
+    /// The child transactions of t run after t's listeners, one after
+    /// another, and before anything the I/O side sends next. Each is a
+    /// whole transaction: cells step in it, a snapshot in a later child
+    /// reads what an earlier one committed, and listeners run after each
+    /// child's commit. [`Runtime::send`](crate::Runtime::send) and
+    /// [`Runtime::transaction`](crate::Runtime::transaction) return after the
+    /// last of them, so a sample then reads what it committed. The build
+    /// closure's transaction has children too: a split of a
+    /// [`steps_with_current`](Cell::steps_with_current) built there runs
+    /// them before [`Runtime::build`](crate::Runtime::build) returns.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use portia::prelude::*;
+    ///
+    /// let mut graph = Runtime::local();
+    /// let (words_in, letters, count) = graph.build(|b| {
+    ///     let (words, words_in) = b.input::<Vec<char>>();
+    ///     let letters = words.split(b).share(b);
+    ///     let count = letters.accumulate(b, 0u32, |_, n| n + 1);
+    ///     (words_in, letters, count)
+    /// });
+    /// let seen = Rc::new(RefCell::new(Vec::new()));
+    /// let log = seen.clone();
+    /// graph.listen(letters, move |c| log.borrow_mut().push(c)).keep();
+    /// graph.send(words_in, vec!['a', 'b', 'c']); // three child transactions
+    /// assert_eq!(*seen.borrow(), ['a', 'b', 'c']);
+    /// assert_eq!(*graph.sample(count), 3); // what the last child committed
+    /// ```
+    ///
+    /// Every split that fires at t shares t's children: child n carries
+    /// element n of each, so those elements are simultaneous, and a
+    /// [`merge`](Source::merge) of two splits combines them. A
+    /// [`defer`](Source::defer) is a split of one element, so its event
+    /// joins element 0. An empty event emits nothing. A split that fires
+    /// inside a child, over another split's elements or through a loop, has
+    /// children of that child, which run before the next child of t: depth
+    /// first, which is time order.
+    ///
+    /// The output does not depend on the input, since it fires in a later
+    /// instant, so a loop through a split is legal (the rule is
+    /// [`Builder::cell_loop`](crate::Builder::cell_loop)'s), and each round of it runs one level of
+    /// child transactions deeper.
+    ///
+    /// A split is two nodes: one takes the event, the other emits the
+    /// elements. The iterator waits in the first between child
+    /// transactions and each element in the second's slot, so the mode
+    /// must accept both types; a `Threaded` graph refuses `Rc` elements:
+    ///
+    /// ```compile_fail,E0277
+    /// use portia::prelude::*;
+    /// use std::rc::Rc;
+    ///
+    /// let _ = Runtime::threaded().build(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _items = numbers.map(|n| vec![Rc::new(n)]).split(b); // error: Rc is not Send
+    /// });
+    /// ```
+    #[track_caller]
+    fn split<C>(self, builder: &mut C) -> Stream<<Self::Event as IntoIterator>::Item>
+    where
+        C: Builder
+            + Stores<Self>
+            + Stores<<Self::Event as IntoIterator>::IntoIter>
+            + Stores<<Self::Event as IntoIterator>::Item>,
+        Self::Event: IntoIterator + 'static,
+        <Self::Event as IntoIterator>::Item: 'static,
+    {
+        let (dependency, cells) = builder.reach_of(&self);
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<<Self::Event as IntoIterator>::IntoIter>>::erase(Erase::Stack),
+        ]);
+        let slot = <C as Stores<<Self::Event as IntoIterator>::Item>>::erase(Erase::Slot);
+        let output = builder
+            .make_pair::<SplitNode<Self>, SlotNode<<Self::Event as IntoIterator>::Item>>(
+                dependency, cells, parts, slot,
+            );
+        Stream::from_token(builder.token_of(output))
+    }
+
+    /// Emits each event again in the first child transaction of the
+    /// transaction t it fires in, `t ++ [0]`: after t's listeners, and
+    /// before anything the I/O side sends next.
+    ///
+    /// That child is not the defer's own. The semantics' `defer` is a
+    /// [`split`](Source::split) of a one-element list, so it shares index
+    /// 0 with every split and every other defer that fires at t: the
+    /// deferred event is simultaneous with their events there, and a
+    /// [`merge`](Source::merge) combines them.
+    ///
+    /// The output does not depend on the input, since it fires in a later
+    /// instant, so a loop through a defer is legal (the rule is
+    /// [`Builder::cell_loop`](crate::Builder::cell_loop)'s), and each round of it runs one child
+    /// transaction deeper. A countdown:
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use portia::prelude::*;
+    ///
+    /// let mut graph = Runtime::local();
+    /// let (starts_in, counts) = graph.build(|b| {
+    ///     let (counts, counts_loop) = b.stream_loop::<u32>();
+    ///     let again = counts.filter(|n| *n > 1).map(|n| n - 1).defer(b);
+    ///     let (starts, starts_in) = b.input::<u32>();
+    ///     let counts = starts.or_else(b, again).share(b);
+    ///     counts_loop.close(b, counts);
+    ///     (starts_in, counts)
+    /// });
+    /// let seen = Rc::new(RefCell::new(Vec::new()));
+    /// let log = seen.clone();
+    /// graph.listen(counts, move |n| log.borrow_mut().push(n)).keep();
+    /// graph.send(starts_in, 3); // 3 at [1], 2 at [1, 0], 1 at [1, 0, 0]
+    /// assert_eq!(*seen.borrow(), [3, 2, 1]);
+    /// ```
+    ///
+    /// Such a loop needs something that stops it, here the filter. A loop
+    /// through a defer whose every event comes back never ends, and
+    /// neither does the `send` that started it: the semantics give it
+    /// infinitely many events before the next transaction, and no check at
+    /// close can tell a loop that stops from one that does not, so the
+    /// engine does not guard against it. It keeps one level of child
+    /// transactions in progress per round, so a loop that does stop grows
+    /// memory with its depth, not the stack.
+    ///
+    /// A defer is two nodes: one takes the event, the other emits it. The
+    /// event waits in the first until the child transaction, and in the
+    /// second's slot after it, so the mode must accept its type; a
+    /// `Threaded` graph refuses `Rc` events:
+    ///
+    /// ```compile_fail,E0277
+    /// use portia::prelude::*;
+    /// use std::rc::Rc;
+    ///
+    /// let _ = Runtime::threaded().build(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _later = numbers.map(Rc::new).defer(b); // error: Rc is not Send
+    /// });
+    /// ```
+    #[track_caller]
+    fn defer<C>(self, builder: &mut C) -> Stream<Self::Event>
+    where
+        C: Builder + Stores<Self> + Stores<Self::Event>,
+        Self::Event: 'static,
+    {
+        let (dependency, cells) = builder.reach_of(&self);
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<Self::Event>>::erase(Erase::Stack),
+        ]);
+        let slot = <C as Stores<Self::Event>>::erase(Erase::Slot);
+        let output = builder
+            .make_pair::<DeferNode<Self>, SlotNode<Self::Event>>(dependency, cells, parts, slot);
+        Stream::from_token(builder.token_of(output))
+    }
+
+    /// Runs `f` at each event with a builder, so it can add to the graph in
+    /// the middle of a transaction. The builder is of the kind `builder` is.
+    /// Its results
+    /// are ordinary events: tokens on their way to a hold and a
+    /// [`Cell::switch_stream`] or [`Cell::switch_cell`], or plain values.
+    ///
+    /// `f` runs in the middle of the transaction t of the event, and what
+    /// it builds exists from t on, t included: a hold built over a stream
+    /// that fires at t holds that event after t, a
+    /// [`steps_with_current`](Cell::steps_with_current) fires at t, and a
+    /// switch starts at t from the inner its outer held before t, moving
+    /// after t if the outer steps at t. A [`sample`](Cell::sample) inside
+    /// `f` reads the value before t, as every read during a transaction
+    /// does. The new nodes run at t once `f` has returned and this node has
+    /// fired, each after what it depends on, so they may depend on this
+    /// node's own events, through a loop.
+    ///
+    /// Tokens created inside `f` flow out as data. An input built there
+    /// reaches I/O code as an event, and a collection runs after each unit,
+    /// so `f` anchors what it sends out with
+    /// [`Builder::anchor`](crate::Builder::anchor). Since a listener has no graph
+    /// access, I/O code attaches listeners and sends to the input after
+    /// [`Runtime::send`](crate::Runtime::send) returns: anchor it at the boundary.
+    ///
+    /// ```
+    /// use std::cell::RefCell;
+    /// use std::rc::Rc;
+    ///
+    /// use portia::prelude::*;
+    ///
+    /// // Each event opens a counter of its own: an input and a hold over it.
+    /// let mut graph = Runtime::local();
+    /// let (open_in, opened) = graph.build(|b| {
+    ///     let (open, open_in) = b.input::<u32>();
+    ///     let opened = open.construct(b, |b, start| {
+    ///         let (bumps, bumps_in) = b.input::<u32>();
+    ///         let count = bumps.accumulate(b, start, |n, c| c + n);
+    ///         b.anchor((bumps_in, count))
+    ///     });
+    ///     (open_in, opened)
+    /// });
+    /// let received = Rc::new(RefCell::new(Vec::new()));
+    /// let log = received.clone();
+    /// graph.listen(opened, move |counter| log.borrow_mut().push(counter)).keep();
+    /// graph.send(open_in, 10); // the row arrives anchored
+    /// let (bumps_in, count) = *received.borrow()[0];
+    /// graph.send(bumps_in, 5); // then wire
+    /// assert_eq!(*graph.sample(count), 15);
+    /// ```
+    ///
+    /// Each run of `f` is a scope, as the build closure is: a loop declared
+    /// in it must close in it, under the rule [`Builder::cell_loop`](crate::Builder::cell_loop) states,
+    /// and a loop left open is a panic when `f` returns. So are a close,
+    /// and a switch's first link, that would make a same-instant cycle, the
+    /// switch's at the end of the transaction's new nodes. Each of these
+    /// panics poisons the graph, as does a panic in `f` itself, and so
+    /// does a run that swaps its build context for another graph's.
+    ///
+    /// A run allocates the nodes it builds, into slots collection freed
+    /// if there are any. They live while a root reaches them: a hold that
+    /// a switch reads keeps the screen it holds, and a screen the switch
+    /// has left, which nothing names any more, is collected (RFD 3). A
+    /// token the closure captures that this construct's stream does not
+    /// depend on is declared with [`Builder::depends`](crate::Builder::depends), or it may be
+    /// collected before the closure's next run uses it; a token the
+    /// closure hands I/O code as data is anchored there. A construct whose
+    /// chain does not fire costs what a chain node costs.
+    ///
+    /// The event waits in the node's slot for its consumer, and keeps
+    /// there until the next event if nothing consumes it, so the mode must
+    /// accept its type; a `Threaded` graph refuses a construct of `Rc`s:
+    ///
+    /// ```compile_fail,E0277
+    /// use portia::prelude::*;
+    /// use std::rc::Rc;
+    ///
+    /// let _ = Runtime::threaded().build(|b| {
+    ///     let (numbers, _numbers_in) = b.input::<u32>();
+    ///     let _made = numbers.construct(b, |_, n| Rc::new(n)); // error: Rc is not Send
+    /// });
+    /// ```
+    ///
+    /// The semantics call this `Execute`.
+    #[track_caller]
+    fn construct<C, B, F>(self, builder: &mut C, f: F) -> Stream<B>
+    where
+        C: Builder + Stores<Self> + Stores<F> + Stores<B>,
+        B: 'static,
+        F: for<'p> FnMut(&mut C::Inner<'p>, Self::Event) -> B + 'static,
+    {
+        let (dependency, cells) = builder.reach_of(&self);
+        let slot = <C as Stores<B>>::erase(Erase::Slot);
+        let parts: Box<[C::Erased]> = Box::new([
+            <C as Stores<Self>>::erase(Erase::Value(self)),
+            <C as Stores<F>>::erase(Erase::Value(f)),
+        ]);
+        let n = builder.make_construct::<Self, B, F>(dependency, cells, slot, parts);
+        Stream::from_token(builder.token_of(n))
+    }
+}
+
+/// The node of `node` and `share`: the chain, fused into one program.
+#[track_caller]
+fn chain_node<S, C>(chain: S, builder: &mut C) -> Token
+where
+    S: Source,
+    C: Builder + Stores<S> + Stores<S::Event>,
+    S::Event: 'static,
+{
+    let (dependency, cells) = builder.reach_of(&chain);
+    let data = Plane::Slot(<C as Stores<S::Event>>::erase(Erase::Slot));
+    let parts: Box<[C::Erased]> = Box::new([<C as Stores<S>>::erase(Erase::Value(chain))]);
+    let n = builder.make::<ChainNode<S>>(Kind::Stream, data, parts, &[dependency], 0, cells);
+    builder.token_of(n)
+}
+
+/// One of `unzip`'s halves, of node type `N`: a stream node whose slot
+/// holds `H`s, with no parts, which depends on the pairs node and takes its
+/// half from there.
+#[track_caller]
+fn half_node<C, H, N>(builder: &mut C, pairs: u32) -> Token
+where
+    C: Builder + Stores<H>,
+    H: 'static,
+    N: AllOps,
+{
+    let data = Plane::Slot(<C as Stores<H>>::erase(Erase::Slot));
+    let n = builder.make::<N>(Kind::Stream, data, Box::new([]), &[pairs], 0, Vec::new());
+    builder.token_of(n)
+}
+
+/// The node of `merge` and `or_else`: two chains and an erased function.
+#[track_caller]
+fn merge_node<C, S, T, F>(left: S, builder: &mut C, right: T, f: C::Erased) -> Stream<S::Event>
+where
+    C: Builder + Stores<S> + Stores<T> + Stores<S::Event>,
+    S: Source,
+    T: Source<Event = S::Event>,
+    F: Fn(S::Event, S::Event) -> S::Event + 'static,
+    S::Event: 'static,
+{
+    let (l, mut cells) = builder.reach_of(&left);
+    let (r, more) = builder.reach_of(&right);
+    cells.extend(more);
+    let data = Plane::Slot(<C as Stores<S::Event>>::erase(Erase::Slot));
+    let parts: Box<[C::Erased]> = Box::new([
+        <C as Stores<S>>::erase(Erase::Value(left)),
+        <C as Stores<T>>::erase(Erase::Value(right)),
+        f,
+    ]);
+    let n = builder.make::<MergeNode<S, T, F>>(Kind::Stream, data, parts, &[l, r], 0, cells);
+    Stream::from_token(builder.token_of(n))
+}
+
+impl<M: Mode> BuildContext<M> {
+    /// Checks a chain's dependency and the tokens its trace visits, and
+    /// returns their indices: the dependency, and the reach, which is every
+    /// token besides the dependency. A foreign or stale token is a
+    /// build-time panic.
+    pub(crate) fn chain_reach<S: Source>(&self, chain: &S) -> (u32, Vec<u32>) {
+        let dependency = self.check(chain.dependency());
+        let mut tracer = Tracer::new();
+        chain.trace(&mut tracer);
+        let reach = tracer
+            .visited
+            .into_iter()
+            .map(|token| self.check(token))
+            .filter(|&index| index != dependency)
+            .collect();
+        (dependency, reach)
+    }
+
+    /// Records what a new node keeps alive beyond its dependencies.
+    pub(crate) fn set_reach(&mut self, n: u32, cells: Vec<u32>) {
+        if !cells.is_empty() {
+            self.store.cold[n as usize].reach = cells;
+        }
+    }
+}
+
+/// A stream you can listen to: a [`Stream`] or a [`Shared`]. A chain of
+/// adapters isn't one until [`node`](Source::node) makes it one, which is
+/// why [`Runtime::listen`](crate::Runtime::listen) takes a `Node`.
+///
+/// Sealed, with hidden items: a listener reads a node the way its type
+/// says, taking the event from an affine stream and cloning it from a
+/// shared one, and a switch needs to know which of the two it holds.
+pub trait Node: Source {
+    /// An affine stream, whose one consumer takes the event.
+    #[doc(hidden)]
+    const AFFINE: bool;
+
+    /// The node this token names.
+    #[doc(hidden)]
+    fn node_token(&self) -> Token;
+
+    /// Reads the event of the node at `index` the way this type does: take
+    /// for an affine stream, clone for a shared one.
+    #[doc(hidden)]
+    fn pull_inner<M: Mode>(cx: &mut Cx<'_, M>, index: u32) -> Option<Self::Event>;
+}
+
+impl<A> sealed::Sealed for Stream<A> {}
+impl<A: 'static> Source for Stream<A> {
+    type Event = A;
+    fn dependency(&self) -> Token {
+        self.token
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<A> {
+        cx.take::<A>(self.token.index)
+    }
+}
+impl<A: 'static> Node for Stream<A> {
+    const AFFINE: bool = true;
+    fn node_token(&self) -> Token {
+        self.token
+    }
+    fn pull_inner<M: Mode>(cx: &mut Cx<'_, M>, index: u32) -> Option<A> {
+        cx.take::<A>(index)
+    }
+}
+
+impl<A> sealed::Sealed for Shared<A> {}
+impl<A: Clone + 'static> Source for Shared<A> {
+    type Event = A;
+    fn dependency(&self) -> Token {
+        self.token
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<A> {
+        cx.cloned::<A>(self.token.index)
+    }
+}
+impl<A: Clone + 'static> Node for Shared<A> {
+    const AFFINE: bool = false;
+    fn node_token(&self) -> Token {
+        self.token
+    }
+    fn pull_inner<M: Mode>(cx: &mut Cx<'_, M>, index: u32) -> Option<A> {
+        cx.cloned::<A>(index)
+    }
+}
+
+/// The adapter returned by [`Source::map`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
+pub struct Map<S, F> {
+    source: S,
+    f: F,
+}
+impl<S, F> sealed::Sealed for Map<S, F> {}
+impl<S: Source, B, F: Fn(S::Event) -> B + 'static> Source for Map<S, F> {
+    type Event = B;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
+        self.source.pull(cx).map(&self.f)
+    }
+}
+impl<S: Trace, F> Trace for Map<S, F> {
+    /// The source alone: a closure is opaque (RFD 3).
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
+    }
+}
+
+/// The adapter returned by [`Source::filter`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
+pub struct Filter<S, P> {
+    source: S,
+    predicate: P,
+}
+impl<S, P> sealed::Sealed for Filter<S, P> {}
+impl<S: Source, P: Fn(&S::Event) -> bool + 'static> Source for Filter<S, P> {
+    type Event = S::Event;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
+        self.source.pull(cx).filter(|e| (self.predicate)(e))
+    }
+}
+impl<S: Trace, P> Trace for Filter<S, P> {
+    /// The source alone: a closure is opaque (RFD 3).
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
+    }
+}
+
+/// The adapter returned by [`Source::filter_map`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
+pub struct FilterMap<S, F> {
+    source: S,
+    f: F,
+}
+impl<S, F> sealed::Sealed for FilterMap<S, F> {}
+impl<S: Source, B, F: Fn(S::Event) -> Option<B> + 'static> Source for FilterMap<S, F> {
+    type Event = B;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
+        self.source.pull(cx).and_then(&self.f)
+    }
+}
+impl<S: Trace, F> Trace for FilterMap<S, F> {
+    /// The source alone: a closure is opaque (RFD 3).
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
+    }
+}
+
+/// The adapter returned by [`Source::map_to`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
+pub struct MapTo<S, B> {
+    source: S,
+    value: B,
+}
+impl<S, B> sealed::Sealed for MapTo<S, B> {}
+impl<S: Source, B: Clone + Trace + 'static> Source for MapTo<S, B> {
+    type Event = B;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
+        self.source.pull(cx).map(|_| self.value.clone())
+    }
+}
+impl<S: Trace, B: Trace> Trace for MapTo<S, B> {
+    /// The value every event carries, then the source.
+    fn trace(&self, tracer: &mut Tracer) {
+        self.value.trace(tracer);
+        self.source.trace(tracer)
+    }
+}
+
+/// The adapter returned by [`Source::snapshot`]. `C` is the type of the
+/// cell token it reads, a [`Cell`] or a [`State`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
+pub struct Snapshot<S, C, F> {
+    source: S,
+    cell: C,
+    f: F,
+}
+impl<S, C, F> sealed::Sealed for Snapshot<S, C, F> {}
+impl<S, C, B, F> Source for Snapshot<S, C, F>
+where
+    S: Source,
+    C: CellRef,
+    F: Fn(S::Event, &C::Value) -> B + 'static,
+{
+    type Event = B;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<B> {
+        let a = self.source.pull(cx)?;
+        // The value before the instant: a read, not a dependency.
+        Some((self.f)(a, cx.sample::<C::Value>(self.cell.token().index)))
+    }
+}
+impl<S: Trace, C: CellRef, F> Trace for Snapshot<S, C, F> {
+    /// The cell it reads, which is reach and never a dependency, since it
+    /// is read as it was before the instant; then the source. The closure is
+    /// opaque (RFD 3).
+    fn trace(&self, tracer: &mut Tracer) {
+        tracer.visit(&self.cell);
+        self.source.trace(tracer)
+    }
+}
+
+/// The adapter returned by [`Source::gate`]. `C` is the type of the cell
+/// token it reads, a [`Cell`] or a [`State`] of `bool`.
+#[must_use = "chains are lazy and do nothing unless materialized"]
+pub struct Gate<S, C> {
+    source: S,
+    cell: C,
+}
+impl<S, C> sealed::Sealed for Gate<S, C> {}
+impl<S: Source, C: CellRef<Value = bool>> Source for Gate<S, C> {
+    type Event = S::Event;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
+        // The source is pulled whether or not the gate is open, so a `once`
+        // inside it takes its first event even when the gate drops it.
+        let a = self.source.pull(cx)?;
+        (*cx.sample::<bool>(self.cell.token().index)).then_some(a)
+    }
+}
+impl<S: Trace, C: CellRef> Trace for Gate<S, C> {
+    /// The cell it reads, which is reach and never a dependency, since it
+    /// is read as it was before the instant; then the source.
+    fn trace(&self, tracer: &mut Tracer) {
+        tracer.visit(&self.cell);
+        self.source.trace(tracer)
+    }
+}
+
+/// The adapter returned by [`Source::once`].
+#[must_use = "chains are lazy and do nothing unless materialized"]
+pub struct Once<S> {
+    source: S,
+    done: bool,
+}
+impl<S> sealed::Sealed for Once<S> {}
+impl<S: Source> Source for Once<S> {
+    type Event = S::Event;
+    fn dependency(&self) -> Token {
+        self.source.dependency()
+    }
+    fn pull<M: Mode>(&mut self, cx: &mut Cx<'_, M>) -> Option<S::Event> {
+        if self.done {
+            return None;
+        }
+        let a = self.source.pull(cx)?;
+        self.done = true;
+        Some(a)
+    }
+}
+impl<S: Trace> Trace for Once<S> {
+    fn trace(&self, tracer: &mut Tracer) {
+        self.source.trace(tracer)
+    }
+}

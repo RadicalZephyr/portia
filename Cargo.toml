@@ -1,8 +1,29 @@
-[package]
-name = "bough"
-description = ""
-authors = ["Zefira Shannon"]
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "3"
+members = ["portia", "portia-derive", "portia-oracle", "portia-bench", "portia-repl"]
+# The GTK spike needs GTK's system libraries, so it is a workspace of its own.
+exclude = ["portia-gtk"]
 
-[dependencies]
+[workspace.package]
+version = "0.0.1"
+authors = ["Zefira Shannon"]
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/portia-rs/portia"
+
+[workspace.dependencies]
+portia = { path = "portia", version = "0.0.1" }
+portia-derive = { path = "portia-derive", version = "0.0.1" }
+portia-oracle = { path = "portia-oracle", version = "0.0.1" }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
+critical-section = "1"
+criterion = "0.5"
+gungraun = "=0.19.4"
+# Pinned to master: 18.0.1 holds a watch line printed just after a command
+# until the next keypress. Move to the first release after it. buffer-redux
+# keeps type-ahead from being dropped between readlines.
+rustyline = { git = "https://github.com/kkawakam/rustyline", rev = "05eb9200f178989ad504718179f11890cfe362c9", features = ["buffer-redux"] }

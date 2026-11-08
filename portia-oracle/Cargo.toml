@@ -1,0 +1,15 @@
+[package]
+name = "portia-oracle"
+description = "The Sodium denotational semantics as an executable oracle, and the property tests that hold portia to it."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+portia.workspace = true
+# The strategies of `generate` are library code.
+proptest.workspace = true

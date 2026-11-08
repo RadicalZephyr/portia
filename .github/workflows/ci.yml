@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  # Every pull request, so stacked spike branches get checked too.
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: Format and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    env:
+      # GHC does not run in CI (RFD 1), so the oracle's tests say they
+      # skipped instead of panicking with the install hint.
+      PORTIA_ORACLE: skip
+    strategy:
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace --all-features ${{ matrix.profile == 'release' && '--release' || '' }}
+
+  targets:
+    name: Check (${{ matrix.target }}${{ matrix.features && ', ' }}${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Bare metal: the no_std core over alloc, with and without the
+          # critical section that guards input slots.
+          - { target: thumbv7m-none-eabi, features: "--no-default-features" }
+          - { target: thumbv7m-none-eabi, features: "--no-default-features --features critical-section" }
+          - { target: thumbv7em-none-eabihf, features: "--no-default-features" }
+          # The Cortex-M0 has no pointer atomics: no Threaded, no Remote.
+          - { target: thumbv6m-none-eabi, features: "--no-default-features" }
+          # With a critical section it keeps input slots, its path from an
+          # interrupt handler into the graph (RFD 7).
+          - { target: thumbv6m-none-eabi, features: "--no-default-features --features critical-section" }
+          # The web keeps std; the no_std build must still type-check there.
+          - { target: wasm32-unknown-unknown, features: "" }
+          - { target: wasm32-unknown-unknown, features: "--no-default-features" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p portia --target ${{ matrix.target }} ${{ matrix.features }}
+
+  msrv:
+    name: Check on the minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p portia --all-features
+
+  regression:
+    name: Instruction-count regression gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install valgrind and the gungraun runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+          cargo install gungraun-runner --version 0.19.4 --locked
+      - name: Measure the base commit
+        run: |
+          git checkout --quiet ${{ github.event.pull_request.base.sha }}
+          if [ -f portia-bench/Cargo.toml ]; then
+            cargo bench -p portia-bench --bench regression
+          else
+            echo "The base commit has no portia-bench crate, so this run only records the head."
+          fi
+      - name: Measure the head commit and compare
+        run: |
+          git checkout --quiet ${{ github.event.pull_request.head.sha }}
+          cargo bench -p portia-bench --bench regression

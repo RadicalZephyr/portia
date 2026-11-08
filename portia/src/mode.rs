@@ -1,0 +1,323 @@
+//! Threading modes (RFD 6).
+//!
+//! A [`Runtime`](crate::Runtime) is `Local` by default. In `Threaded` mode every
+//! value and closure the graph stores must be `Send`, checked once at each
+//! materialization and at `listen`, and the graph itself is `Send`. Tokens
+//! are plain integers and `Send` in every mode. `Threaded` exists only where
+//! the target has pointer atomics, since only there is the state a runtime
+//! shares with its guards atomic; a Cortex-M0 has `Local` alone. On wasm32 the gate is true, so `Threaded`
+//! exists there with no threads to use it, and `Local` is the web mode.
+//!
+//! Every value, closure and chain a node stores is erased into the mode's
+//! carrier: `Box<dyn Any>` in `Local`, `Box<dyn Any + Send>` in `Threaded`.
+//! Exactly three functions build a carrier: [`Accepts::erase`], whose
+//! `Threaded` impl exists only for `T: Send`, and `Mode::erase_send` and the
+//! erasure of a [`Portable`](crate::Portable), which require `T: Send`
+//! themselves; a `Portable`'s `Send` box becomes a `Local` carrier by
+//! forgetting it is `Send`. So `Runtime<Threaded>: Send` is derived by the
+//! compiler from the field types, with no `unsafe impl`, and a materializer
+//! that forgets an `Accepts` bound fails to compile inside the engine.
+//!
+//! A `Local` runtime also keeps the queue its [`Io`](crate::Io)s share,
+//! behind an `Rc`. A `Threaded` one keeps nothing there, since it has no
+//! `Io`, so the `Rc` doesn't stop it being `Send`.
+//!
+//! A `Local` graph is not `Send`, and nothing in the crate says so by hand:
+//!
+//! ```compile_fail,E0277
+//! fn assert_send<T: Send>() {}
+//! assert_send::<portia::Runtime<portia::Local>>(); // error: dyn Any cannot be sent between threads
+//! ```
+//!
+//! A `Threaded` graph refuses a closure that captures something that is not
+//! `Send`, at the materializer that stores it:
+//!
+//! ```compile_fail,E0277
+//! use portia::prelude::*;
+//! use std::rc::Rc;
+//!
+//! let offset = Rc::new(5u32);
+//! let _ = Runtime::threaded().build(move |b| {
+//!     let (numbers, _numbers_in) = b.input::<u32>();
+//!     let _held = numbers.map(move |n| n + *offset).hold(b, 0u32); // error: Rc is not Send
+//! });
+//! ```
+
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::any::Any;
+
+use crate::build::BuildContext;
+use crate::builder::{AllOps, Portable};
+use crate::engine::{CellValue, Memo, NodeOps, Ops};
+#[cfg(target_has_atomic = "ptr")]
+use crate::io::NoIo;
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::io::Registration;
+use crate::io::{IoQueue, IoState};
+#[cfg(all(
+    target_has_atomic = "ptr",
+    any(feature = "std", feature = "critical-section")
+))]
+use crate::runtime::{Runtime, Stop};
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A threading mode: [`Local`] or [`Threaded`]. Sealed.
+pub trait Mode: sealed::Sealed + Sized + 'static {
+    /// What every stored value, closure and chain is erased into:
+    /// `Box<dyn Any>` in `Local`, `Box<dyn Any + Send>` in `Threaded`.
+    #[doc(hidden)]
+    type Carrier: Carrier;
+
+    /// What the runtime keeps for its same-thread handle: the queue its
+    /// `Io`s share in `Local`, and nothing in `Threaded`.
+    #[doc(hidden)]
+    type IoQueue: IoQueue<Self>;
+
+    /// Erases a value the engine makes that is `Send` whatever the user's
+    /// types are, such as a token inside `input_cell`'s chain or `or_else`'s
+    /// function pointer. Generic code cannot prove `M: Accepts<Stream<A>>`,
+    /// but it can prove `Stream<A>: Send`.
+    #[doc(hidden)]
+    fn erase_send<T: Send + 'static>(value: T) -> Self::Carrier;
+
+    /// This mode's functions for the node type `N`, which has functions
+    /// for every mode, so that code generic over the builder can name it.
+    #[doc(hidden)]
+    fn ops_of<N: AllOps>() -> &'static Ops<Self>;
+
+    /// A [`Portable`] borrowing a build context of this mode, for a portable
+    /// core's `construct` closure.
+    #[doc(hidden)]
+    fn portable(build: &mut BuildContext<Self>) -> Portable<'_>;
+
+    /// Registers what a `RemoteIo` queued into a runtime of this mode, at
+    /// the pump.
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    #[doc(hidden)]
+    fn register(
+        runtime: &mut Runtime<Self>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop>;
+}
+
+/// Access to an erased part: a checked downcast, never an unchecked one.
+#[doc(hidden)]
+pub trait Carrier: 'static {
+    /// The erased value, for a checked downcast by reference.
+    fn get(&self) -> &dyn Any;
+    /// The erased value, for a checked downcast by mutable reference.
+    fn get_mut(&mut self) -> &mut dyn Any;
+}
+
+impl Carrier for Box<dyn Any> {
+    fn get(&self) -> &dyn Any {
+        &**self
+    }
+    fn get_mut(&mut self) -> &mut dyn Any {
+        &mut **self
+    }
+}
+
+impl Carrier for Box<dyn Any + Send> {
+    fn get(&self) -> &dyn Any {
+        &**self
+    }
+    fn get_mut(&mut self) -> &mut dyn Any {
+        &mut **self
+    }
+}
+
+/// The closed set of shapes the engine stores a user type `T` in, fixed in
+/// stage 1 of the engine. Each shape is a concrete container of exactly one
+/// `T`, so inside the `Threaded` impl, where `T: Send` is known, every shape
+/// is `Send` and coerces to `Box<dyn Any + Send>`.
+#[doc(hidden)]
+pub enum Erase<T> {
+    /// `T` itself: a chain, a closure, a state.
+    Value(T),
+    /// `Option<T>`, empty: a stream node's slot, a pending event.
+    Slot,
+    /// A stateful cell: its committed value, and no pending value yet.
+    Cell(T),
+    /// A read-through cell's memo and post-instant value, both empty.
+    Memo,
+    /// `Vec<Option<T>>`, empty: a split's iterators or a defer's events, one
+    /// per depth at which the node fired.
+    Stack,
+}
+
+/// Whether a graph in this mode may store a `T`.
+///
+/// `Local` accepts everything; `Threaded` accepts `Send` types. Every
+/// materializer and `listen` carries an `M: Accepts<..>` bound for the values
+/// and closures it stores, which is where a non-`Send` capture in a
+/// `Threaded` graph fails to compile. On a non-atomics wasm32 build a
+/// `JsValue` is `Send`, so `Threaded` accepts it; a `Closure` is not.
+///
+/// `Mode` is a supertrait, and the hidden method is the only way the engine
+/// stores a user type, so a bound left off a materializer does not compile.
+/// Downstream impls were never possible: coherence rejects
+/// `impl Accepts<NotSend> for Threaded`.
+///
+/// A function generic over the mode builds graph with the bounds its
+/// materializers need. It takes its closures from its caller, whose mode is
+/// concrete, or uses function pointers, because a bound can name those
+/// types:
+///
+/// ```
+/// use portia::prelude::*;
+/// use portia::Map;
+///
+/// fn plus<M, F>(b: &mut BuildContext<M>, numbers: Stream<u32>, f: F) -> Cell<u32>
+/// where
+///     M: Mode + Accepts<u32> + Accepts<Map<Stream<u32>, F>>,
+///     F: Fn(u32) -> u32 + 'static,
+/// {
+///     numbers.map(f).hold(b, 0)
+/// }
+/// ```
+///
+/// It cannot make a closure of its own and store it, since the bound would
+/// have to name the closure's type:
+///
+/// ```compile_fail,E0277
+/// use portia::prelude::*;
+///
+/// fn plus_one<M: Mode + Accepts<u32>>(b: &mut BuildContext<M>, numbers: Stream<u32>) -> Cell<u32> {
+///     numbers.map(|n| n + 1).hold(b, 0) // error: M: Accepts<Map<Stream<u32>, {closure}>>
+/// }
+/// ```
+///
+/// A core written against [`Portable`](crate::Portable) can, since its
+/// builder has no type parameter: the bound names `Portable`, and the
+/// compiler checks the closure's real type for `Send` at the materializer.
+/// Either mode's builder lends one:
+///
+/// ```
+/// use portia::prelude::*;
+///
+/// fn plus_one(b: &mut Portable<'_>, numbers: Stream<u32>) -> Cell<u32> {
+///     numbers.map(|n| n + 1).hold(b, 0)
+/// }
+/// ```
+pub trait Accepts<T: ?Sized>: Mode {
+    /// Erases `T` in one of the engine's shapes.
+    #[doc(hidden)]
+    fn erase(what: Erase<T>) -> Self::Carrier
+    where
+        T: Sized + 'static;
+}
+
+/// The body of both `erase` impls: the same match, typed at the carrier of
+/// the impl it expands in.
+macro_rules! erase_body {
+    ($what:expr, $t:ty) => {
+        match $what {
+            Erase::Value(value) => Box::new(value),
+            Erase::Slot => Box::new(None::<$t>),
+            Erase::Cell(value) => Box::new(CellValue {
+                value,
+                pending: None,
+            }),
+            Erase::Memo => Box::new(Memo::<$t>::new()),
+            Erase::Stack => Box::new(Vec::<Option<$t>>::new()),
+        }
+    };
+}
+
+/// The default mode: one thread builds and drives the graph, and stored
+/// values and closures need not be `Send`.
+pub struct Local;
+
+impl sealed::Sealed for Local {}
+impl Mode for Local {
+    type Carrier = Box<dyn Any>;
+    type IoQueue = Rc<IoState>;
+    fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any> {
+        Box::new(value)
+    }
+    fn ops_of<N: AllOps>() -> &'static Ops<Local> {
+        &<N as NodeOps<Local>>::OPS
+    }
+    fn portable(build: &mut BuildContext<Local>) -> Portable<'_> {
+        Portable::local(build)
+    }
+    #[cfg(all(
+        target_has_atomic = "ptr",
+        any(feature = "std", feature = "critical-section")
+    ))]
+    fn register(
+        runtime: &mut Runtime<Local>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop> {
+        registration.local(runtime, skip_stale)
+    }
+}
+
+impl<T: ?Sized> Accepts<T> for Local {
+    fn erase(what: Erase<T>) -> Box<dyn Any>
+    where
+        T: Sized + 'static,
+    {
+        erase_body!(what, T)
+    }
+}
+
+/// Everything the graph stores must be `Send`, and the graph is `Send`, so it
+/// can be moved into a task or shared behind a mutex.
+#[cfg(target_has_atomic = "ptr")]
+pub struct Threaded;
+
+#[cfg(target_has_atomic = "ptr")]
+impl sealed::Sealed for Threaded {}
+#[cfg(target_has_atomic = "ptr")]
+impl Mode for Threaded {
+    type Carrier = Box<dyn Any + Send>;
+    type IoQueue = NoIo;
+    fn erase_send<T: Send + 'static>(value: T) -> Box<dyn Any + Send> {
+        Box::new(value)
+    }
+    fn ops_of<N: AllOps>() -> &'static Ops<Threaded> {
+        &<N as NodeOps<Threaded>>::OPS
+    }
+    fn portable(build: &mut BuildContext<Threaded>) -> Portable<'_> {
+        Portable::threaded(build)
+    }
+    #[cfg(any(feature = "std", feature = "critical-section"))]
+    fn register(
+        runtime: &mut Runtime<Threaded>,
+        registration: Box<dyn Registration>,
+        skip_stale: bool,
+    ) -> Result<(), Stop> {
+        registration.threaded(runtime, skip_stale)
+    }
+}
+
+#[cfg(target_has_atomic = "ptr")]
+impl<T: ?Sized + Send> Accepts<T> for Threaded {
+    fn erase(what: Erase<T>) -> Box<dyn Any + Send>
+    where
+        T: Sized + 'static,
+    {
+        erase_body!(what, T)
+    }
+}
+
+/// The body of `Stores::erase` for a [`Portable`]: the engine's shapes of
+/// a `Send` type, in a `Send` box, which either mode's carrier takes.
+pub(crate) fn erase_send_shape<T: Send + 'static>(what: Erase<T>) -> Box<dyn Any + Send> {
+    erase_body!(what, T)
+}
