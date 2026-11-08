@@ -16,7 +16,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use portia::prelude::*;
-use portia::{CollectionPolicy, PoisonedError, SendError, TokenError, Tracer, TransactionSendError};
+use portia::{
+    CollectionPolicy, PoisonedError, SendError, TokenError, Tracer, TransactionSendError,
+};
 
 // ----------------------------------------------------------- helpers
 

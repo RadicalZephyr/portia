@@ -3,8 +3,8 @@
 
 mod common;
 
-use portia_repl::Repl;
 use common::{listing, transcript};
+use portia_repl::Repl;
 
 #[test]
 fn a_diamond_prints_one_correct_update_per_set() {

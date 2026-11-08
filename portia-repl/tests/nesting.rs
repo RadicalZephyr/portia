@@ -3,8 +3,8 @@
 
 mod common;
 
-use portia_repl::Repl;
 use common::{listing, transcript, with_manual_clock};
+use portia_repl::Repl;
 
 /// A ticking REPL whose `splash` is defined by `lines`, and what it prints
 /// over 15 ticks.

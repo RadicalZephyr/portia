@@ -4,8 +4,8 @@
 
 mod common;
 
-use portia_repl::Repl;
 use common::{TICK, Ticks, listing, ticking, with_manual_clock};
+use portia_repl::Repl;
 
 /// The brief's sentinel demo, with ticks between its commands. Each
 /// redefinition of `out` shows at once, since the switch steps when it

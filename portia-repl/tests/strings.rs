@@ -3,8 +3,8 @@
 
 mod common;
 
-use portia_repl::Repl;
 use common::{listing, transcript};
+use portia_repl::Repl;
 
 #[test]
 fn a_str_input_is_set_and_watched_like_any_other() {

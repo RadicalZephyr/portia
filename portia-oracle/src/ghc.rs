@@ -900,7 +900,8 @@ mod tests {
     /// A directory of its own for one lock test, under the system's
     /// temporary directory.
     fn lock_directory(name: &str) -> PathBuf {
-        let directory = env::temp_dir().join(format!("portia-oracle-{name}-{}", std::process::id()));
+        let directory =
+            env::temp_dir().join(format!("portia-oracle-{name}-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         directory
     }

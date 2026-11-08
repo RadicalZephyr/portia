@@ -350,7 +350,11 @@ pub trait EngineMode: portia::Mode {
         f: ConstructFn<Self, B>,
     ) -> Stream<B>;
     /// `b.connect(input, slot, 0)`.
-    fn connect(b: &mut BuildContext<Self>, input: portia::Input<i64>, slot: &'static InputSlot<i64>);
+    fn connect(
+        b: &mut BuildContext<Self>,
+        input: portia::Input<i64>,
+        slot: &'static InputSlot<i64>,
+    );
     /// `cell.map_cell(b, f)`.
     fn map_cell<A: 'static, B: Send + 'static>(
         b: &mut BuildContext<Self>,

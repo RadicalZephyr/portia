@@ -5,10 +5,10 @@
 
 use std::hint::black_box;
 
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use portia_bench::{
     FanOut, FanOutBaseline, Frame, FrameBaseline, Shallow, ShallowBaseline, payload,
 };
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn the_payload(c: &mut Criterion) {
     c.bench_function("payload", |b| b.iter(|| payload(black_box(7))));

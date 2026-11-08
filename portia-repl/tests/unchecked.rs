@@ -7,10 +7,10 @@ mod common;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use common::{apply, define, int_input};
 use portia::SendError;
 use portia_repl::graph::{Def, Graph};
 use portia_repl::ty::Literal;
-use common::{apply, define, int_input};
 
 fn panic_message(f: impl FnOnce()) -> String {
     let payload = catch_unwind(AssertUnwindSafe(f)).expect_err("a panic");

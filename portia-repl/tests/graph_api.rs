@@ -6,9 +6,9 @@ mod common;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use common::{apply, define, int_input};
 use portia_repl::graph::{Def, Graph};
 use portia_repl::ty::{Literal, Node};
-use common::{apply, define, int_input};
 
 fn int(n: i64) -> Def {
     Def::Literal(Literal::Int(n))

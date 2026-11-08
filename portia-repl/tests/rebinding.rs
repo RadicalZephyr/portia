@@ -4,8 +4,8 @@
 
 mod common;
 
-use portia_repl::Repl;
 use common::{listing, transcript};
+use portia_repl::Repl;
 
 fn repl(lines: &[&str]) -> Repl {
     let mut repl = Repl::new();

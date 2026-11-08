@@ -3,9 +3,9 @@
 
 mod common;
 
+use common::{listing, transcript, with_manual_clock};
 use portia_repl::Repl;
 use portia_repl::registry;
-use common::{listing, transcript, with_manual_clock};
 
 const WORD_FOR_MOD_N: &str = "(defgraph word-for-mod-n [x n word] (if (eq (mod x n) 0) word \"\"))";
 

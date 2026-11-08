@@ -164,7 +164,11 @@ impl<M: Mode> BuildContext<M> {
     /// Takes a forward's node off the current scope's open loops. A loop
     /// declared in another scope, or already closed, is not there.
     pub(crate) fn close_in_scope(&mut self, forward: u32) {
-        let start = *self.s.scopes.last().expect("portia engine: a scope is open");
+        let start = *self
+            .s
+            .scopes
+            .last()
+            .expect("portia engine: a scope is open");
         // The current scope is the innermost, so its loops run to the end
         // of the list and a swap_remove keeps every scope's offset.
         let at = self.s.open_loops[start..]
