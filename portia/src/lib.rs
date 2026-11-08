@@ -33,9 +33,7 @@
 //!   results leave it, and dropping it shuts everything down.
 //! - The build closure you pass to [`Runtime::build`] is where you add to
 //!   the graph. Its argument, `b`, is a [`BuildContext`], and a method that
-//!   takes `b` adds a node. A part of a graph is an ordinary function that
-//!   takes `b` and returns tokens, so you combine Portia programs the way
-//!   you combine any other functions.
+//!   takes `b` adds a node.
 //! - A [`Stream`] is events that happen at an instant: each line read, each
 //!   click. A stream has one consumer. [`share`](Source::share) it to get a
 //!   [`Shared`], which takes any number of consumers and clones each event
@@ -120,6 +118,48 @@
 //! `derive` feature, which is on by default. Wrap a type from another crate in
 //! [`Leaf`] if it never contains tokens, or your own newtype if it
 //! can contain tokens and you need to provide a [`Trace`] impl.
+//!
+//! # Composing graphs
+//!
+//! Since your own types can hold tokens, you can organize a graph the way
+//! you organize any other Rust program. Building a part of a graph is an
+//! ordinary function: it takes a `Builder` and the streams and cells it needs, and
+//! returns the tokens it made. You keep those tokens in structs, tuples,
+//! enums and collections. You can pass them to other functions, return them
+//! from `build`, or keep them in a cell, so a switch can move between them.
+//! Derive [`Trace`] for those types, and the collector sees through them
+//! wherever they are: in what `build` returned, in a cell's value, in an
+//! anchor, or in what you declared with [`depends`](Builder::depends).
+#![cfg_attr(
+    feature = "derive",
+    doc = r#"
+```
+use portia::prelude::*;
+
+/// A counter: an input that bumps it, and the count so far.
+#[derive(Clone, Copy, Trace)]
+struct Counter {
+    bump: Input<u32>,
+    count: Cell<u32>,
+}
+
+fn counter(b: &mut BuildContext, start: u32) -> Counter {
+    let (bumps, bump) = b.input::<u32>();
+    let count = bumps.accumulate(b, start, |n, c| c + n);
+    Counter { bump, count }
+}
+
+let mut rt = Runtime::local();
+let (left, right) = rt.build(|b| (counter(b, 0), counter(b, 100)));
+rt.send(left.bump, 1);
+rt.send(right.bump, 5);
+assert_eq!(*rt.sample(left.count), 1);
+assert_eq!(*rt.sample(right.count), 105);
+```
+"#
+)]
+//!
+//! So you combine Portia programs the way you combine any other Rust code.
 //!
 //! # Rules for code Portia runs
 //!
