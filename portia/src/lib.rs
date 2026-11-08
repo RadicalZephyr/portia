@@ -116,9 +116,8 @@
 //!
 //! Every value a cell holds implements [`Trace`], so the collector
 //! can find any tokens inside it. The standard library's types
-//! already do. For your own state types, turn on the `derive`
-//! feature, `portia = { version = "0.0.1", features = ["derive"] }`,
-//! and add `#[derive(Trace)]`. Wrap a type from another crate in
+//! already do. For your own state types, add `#[derive(Trace)]`, from the
+//! `derive` feature, which is on by default. Wrap a type from another crate in
 //! [`Leaf`] if it never contains tokens, or your own newtype if it
 //! can contain tokens and you need to provide a [`Trace`] impl.
 //!
@@ -191,7 +190,9 @@
 //!
 //! The core is `no_std` over `alloc`. The `std` feature, on by default, adds
 //! the thread-id guard on [`RemoteIo`], `Trace` for the standard collections
-//! and `Instant`, and the standard mutex under input slots. Where the target
+//! and `Instant`, and the standard mutex under input slots. The `derive`
+//! feature is on by default too, so a build with `default-features = false`
+//! adds it back to keep `#[derive(Trace)]`. Where the target
 //! has no pointer atomics, on a Cortex-M0, `Threaded`, `RemoteIo` and the
 //! unit queue do not exist, and the path from an interrupt handler into the
 //! graph is an [`InputSlot`]. The `critical-section` feature guards slots on bare metal;
