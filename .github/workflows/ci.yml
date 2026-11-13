@@ -5,6 +5,7 @@ on:
     branches: ["main"]
   # Every pull request, so stacked spike branches get checked too.
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
