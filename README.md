@@ -2,6 +2,10 @@
 
 **Lightweight functional reactive programming, spun from Rust.**
 
+[![Crates.io Version](https://img.shields.io/crates/v/portia)](https://crates.io/crates/portia)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![CI](https://github.com/portia-rs/portia/actions/workflows/ci.yml/badge.svg)](https://github.com/portia-rs/portia/actions/workflows/ci.yml)
+
 ## Overview
 
 ### If FRP means nothing to you
