@@ -146,6 +146,25 @@ impl Frame {
         });
     }
 
+    /// The frame's sends unbatched: one transaction per input, through
+    /// [`Runtime::send`]. The propagation work is the frame's, so the
+    /// difference from [`frame`](Frame::frame) is the fixed cost of
+    /// [`FRAME_INPUTS`] − 1 extra transactions on a large graph.
+    pub fn unbatched_send(&mut self, k: u64) {
+        for (i, input) in self.inputs.iter().enumerate() {
+            self.graph.send(*input, k + i as u64);
+        }
+    }
+
+    /// [`unbatched_send`](Frame::unbatched_send) through
+    /// [`Runtime::transaction`] with one send each, so the difference
+    /// between the two is what the multi-send API costs over `send`.
+    pub fn unbatched_transaction(&mut self, k: u64) {
+        for (i, input) in self.inputs.iter().enumerate() {
+            self.graph.transaction(|tx| tx.send(*input, k + i as u64));
+        }
+    }
+
     pub fn checksum(&self) -> u64 {
         self.outs
             .iter()
@@ -313,13 +332,21 @@ mod tests {
     #[test]
     fn the_frame_shape_agrees_with_its_baseline() {
         let mut frame = Frame::new();
+        let mut send = Frame::new();
+        let mut transaction = Frame::new();
         let mut base = FrameBaseline::new();
         assert_eq!(frame.graph.live_nodes(), 2 + FRAME_INPUTS * 10);
         for k in 0..5 {
             frame.frame(k);
+            send.unbatched_send(k);
+            transaction.unbatched_transaction(k);
             base.frame(k);
         }
+        // The inputs' islands are independent, so batching cannot change
+        // the result.
         assert_eq!(frame.checksum(), base.checksum());
+        assert_eq!(send.checksum(), base.checksum());
+        assert_eq!(transaction.checksum(), base.checksum());
     }
 
     #[test]

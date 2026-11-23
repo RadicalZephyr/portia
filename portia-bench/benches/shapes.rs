@@ -57,6 +57,22 @@ fn frame(c: &mut Criterion) {
         });
         black_box(shape.checksum());
     });
+    // Information, not held to the bar: the baseline has no transactions.
+    for (name, transaction) in [("unbatched_send", false), ("unbatched_transaction", true)] {
+        group.bench_function(BenchmarkId::new("portia", name), |b| {
+            let mut shape = Frame::new();
+            let mut k = 0u64;
+            b.iter(|| {
+                k += 1;
+                if transaction {
+                    shape.unbatched_transaction(black_box(k));
+                } else {
+                    shape.unbatched_send(black_box(k));
+                }
+            });
+            black_box(shape.checksum());
+        });
+    }
     group.bench_function("baseline", |b| {
         let mut base = FrameBaseline::new();
         let mut k = 0u64;

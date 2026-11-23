@@ -33,6 +33,23 @@ fn frame() -> u64 {
     black_box(shape.checksum())
 }
 
+// Ten frames' worth of sends to the frame shape, one transaction per send,
+// build included: through `send`, or through `transaction` with one send.
+#[library_benchmark]
+#[bench::send(false)]
+#[bench::transaction(true)]
+fn frame_unbatched(transaction: bool) -> u64 {
+    let mut shape = Frame::new();
+    for k in 0..10 {
+        if transaction {
+            shape.unbatched_transaction(black_box(k));
+        } else {
+            shape.unbatched_send(black_box(k));
+        }
+    }
+    black_box(shape.checksum())
+}
+
 // A thousand transactions of the fan-out shape, build included.
 #[library_benchmark]
 fn fan_out() -> u64 {
@@ -43,7 +60,7 @@ fn fan_out() -> u64 {
     black_box(shape.sum())
 }
 
-library_benchmark_group!(name = shapes; benchmarks = shallow, frame, fan_out);
+library_benchmark_group!(name = shapes; benchmarks = shallow, frame, frame_unbatched, fan_out);
 
 main!(
     config = LibraryBenchmarkConfig::default()
