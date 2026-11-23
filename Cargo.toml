@@ -19,5 +19,5 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 critical-section = "1"
-criterion = "0.5"
-gungraun = "=0.19.4"
+criterion = "0.8"
+gungraun = "=0.20.0"

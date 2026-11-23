@@ -34,7 +34,7 @@ fn first(x: u64) -> u64 {
 }
 #[inline(always)]
 fn keep(x: &u64) -> bool {
-    x % 7 != 0
+    !x.is_multiple_of(7)
 }
 #[inline(always)]
 fn last(x: u64) -> u64 {

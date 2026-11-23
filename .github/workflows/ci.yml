@@ -93,15 +93,31 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install valgrind and the gungraun runner
+      - name: Install valgrind
         run: |
           sudo apt-get update
           sudo apt-get install -y valgrind
-          cargo install gungraun-runner --version 0.19.4 --locked
+      # The runner refuses a gungraun library of any other version, so each
+      # checkout installs the runner its own lockfile names. On a pull request
+      # that bumps gungraun the base and head need different runners.
+      - name: Write the runner install script
+        run: |
+          cat > "$RUNNER_TEMP/install-runner" <<'EOF'
+          #!/bin/sh
+          set -eu
+          version=$(awk '$0 == "name = \"gungraun\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          if [ -z "$version" ]; then
+            echo "Cargo.lock names no gungraun version" >&2
+            exit 1
+          fi
+          cargo install gungraun-runner --version "$version" --locked
+          EOF
+          chmod +x "$RUNNER_TEMP/install-runner"
       - name: Measure the base commit
         run: |
           git checkout --quiet ${{ github.event.pull_request.base.sha }}
           if [ -f portia-bench/Cargo.toml ]; then
+            "$RUNNER_TEMP/install-runner"
             cargo bench -p portia-bench --bench regression
           else
             echo "The base commit has no portia-bench crate, so this run only records the head."
@@ -109,4 +125,5 @@ jobs:
       - name: Measure the head commit and compare
         run: |
           git checkout --quiet ${{ github.event.pull_request.head.sha }}
+          "$RUNNER_TEMP/install-runner"
           cargo bench -p portia-bench --bench regression
