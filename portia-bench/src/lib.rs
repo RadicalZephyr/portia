@@ -109,12 +109,17 @@ pub struct Frame {
 
 impl Frame {
     pub fn new() -> Self {
+        Self::with_inputs(FRAME_INPUTS)
+    }
+
+    /// The frame shape with `n` inputs in place of [`FRAME_INPUTS`].
+    pub fn with_inputs(n: usize) -> Self {
         let mut graph = Runtime::local();
         let (inputs, outs) = graph.build(|b| {
             let (open, _open_in) = b.input_cell(true);
-            let mut inputs = Vec::with_capacity(FRAME_INPUTS);
-            let mut outs = Vec::with_capacity(FRAME_INPUTS * 4);
-            for _ in 0..FRAME_INPUTS {
+            let mut inputs = Vec::with_capacity(n);
+            let mut outs = Vec::with_capacity(n * 4);
+            for _ in 0..n {
                 let (x, x_in) = b.input::<u64>();
                 let x = x.share(b);
                 let left = x.map(|v| v + 1).share(b);
@@ -162,6 +167,23 @@ impl Frame {
     pub fn unbatched_transaction(&mut self, k: u64) {
         for (i, input) in self.inputs.iter().enumerate() {
             self.graph.transaction(|tx| tx.send(*input, k + i as u64));
+        }
+    }
+
+    /// One transaction: the first `n` inputs send.
+    pub fn batch(&mut self, n: usize, k: u64) {
+        let inputs = &self.inputs[..n];
+        self.graph.transaction(|tx| {
+            for (i, input) in inputs.iter().enumerate() {
+                tx.send(*input, k + i as u64);
+            }
+        });
+    }
+
+    /// [`batch`](Frame::batch)'s sends unbatched, through [`Runtime::send`].
+    pub fn unbatched_batch(&mut self, n: usize, k: u64) {
+        for (i, input) in self.inputs[..n].iter().enumerate() {
+            self.graph.send(*input, k + i as u64);
         }
     }
 
@@ -347,6 +369,17 @@ mod tests {
         assert_eq!(frame.checksum(), base.checksum());
         assert_eq!(send.checksum(), base.checksum());
         assert_eq!(transaction.checksum(), base.checksum());
+    }
+
+    #[test]
+    fn a_batch_agrees_with_its_sends_unbatched() {
+        let mut batched = Frame::with_inputs(300);
+        let mut unbatched = Frame::with_inputs(300);
+        for (k, n) in [1, 10, 100, 300].into_iter().enumerate() {
+            batched.batch(n, k as u64);
+            unbatched.unbatched_batch(n, k as u64);
+        }
+        assert_eq!(batched.checksum(), unbatched.checksum());
     }
 
     #[test]

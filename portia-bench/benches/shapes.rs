@@ -5,7 +5,7 @@
 
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use portia_bench::{
     FanOut, FanOutBaseline, Frame, FrameBaseline, Shallow, ShallowBaseline, payload,
 };
@@ -85,6 +85,37 @@ fn frame(c: &mut Criterion) {
     group.finish();
 }
 
+/// Islands in the graph [`frame_batch`] sends into, and the batch sizes it
+/// sends. The graph stays the same size so only the batch size changes.
+const BATCH_GRAPH: usize = 10_000;
+const BATCH_SIZES: [usize; 7] = [1, 10, 100, 300, 1000, 3000, 10_000];
+
+/// Information, not held to the bar: the frame shape's cost per input
+/// against how many inputs send in one transaction, next to the same sends
+/// unbatched.
+fn frame_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("frame_batch");
+    let mut shape = Frame::with_inputs(BATCH_GRAPH);
+    let mut k = 0u64;
+    for n in BATCH_SIZES {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("batched", n), &n, |b, &n| {
+            b.iter(|| {
+                k += 1;
+                shape.batch(n, black_box(k));
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("unbatched", n), &n, |b, &n| {
+            b.iter(|| {
+                k += 1;
+                shape.unbatched_batch(n, black_box(k));
+            });
+        });
+    }
+    black_box(shape.checksum());
+    group.finish();
+}
+
 fn fan_out(c: &mut Criterion) {
     let mut group = c.benchmark_group("fan_out");
     group.bench_function("portia", |b| {
@@ -108,5 +139,5 @@ fn fan_out(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, the_payload, shallow, frame, fan_out);
+criterion_group!(benches, the_payload, shallow, frame, frame_batch, fan_out);
 criterion_main!(benches);
