@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Runtime::reserve_nodes`, which makes room in the arena ahead of a build, so that a
+  program about to build a large graph pays for the arena's growth once, at setup.
+
 ## [0.0.1] - 2026-11-07
 
 The first release: a proof-of-concept spike written by Claude, to show that the interface

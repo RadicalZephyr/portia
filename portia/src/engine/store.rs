@@ -150,6 +150,20 @@ impl<M: Mode> Store<M> {
             self.free.push_back(index);
         }
     }
+
+    /// Makes room for `additional` more nodes without growing: freed slots
+    /// count, and the rest is reserved at the end of every list together,
+    /// since `alloc` pushes to all of them at once.
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        let more = additional.saturating_sub(self.free.len());
+        self.hot.reserve(more);
+        self.relations.reserve(more);
+        self.cold.reserve(more);
+        self.data.reserve(more);
+        self.parts.reserve(more);
+        self.ops.reserve(more);
+        self.listeners.reserve(more);
+    }
 }
 
 /// Why a token does not name a live node of this graph.

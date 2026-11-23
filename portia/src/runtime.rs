@@ -1149,6 +1149,19 @@ impl<M: Mode> Runtime<M> {
         self.policy = policy;
     }
 
+    /// Makes room in the arena for `additional` more nodes, so that
+    /// building them doesn't grow it. Slots that collection freed count
+    /// toward the room.
+    ///
+    /// The arena grows by doubling, and the build that finds it full pays
+    /// to move every node already in it. A program that knows it is about
+    /// to build a large graph, or that its constructs will build often,
+    /// can pay for that once, at setup. Only the arena is reserved: a
+    /// build still allocates what its nodes hold and its own bookkeeping.
+    pub fn reserve_nodes(&mut self, additional: usize) {
+        self.build.store.reserve(additional);
+    }
+
     /// With `true`, collects after every unit, whatever the policy, so that
     /// a closure capture that should have been declared with
     /// [`depends`](crate::Builder::depends), or a token that left a transaction
@@ -2447,7 +2460,8 @@ impl RemoteTransaction<'_> {
 mod tests {
     use crate::builder::Builder;
     use crate::engine::slot;
-    use crate::{Local, Runtime, Source};
+    use crate::{CollectionPolicy, Local, Runtime, Source};
+    use alloc::vec::Vec;
 
     /// Claim 1, read off the data plane: an affine consumer moves the event
     /// out of its dependency's slot, and a shared slot keeps its event for
@@ -2520,5 +2534,63 @@ mod tests {
         assert_eq!(entries(&graph), 2, "a dropped guard's entry waits");
         graph.send(numbers_in, 2);
         assert_eq!(entries(&graph), 1, "until the node's next dispatch");
+    }
+
+    /// The capacity of every list in the arena, in the store's order.
+    fn capacities(graph: &Runtime) -> [usize; 7] {
+        let s = &graph.build.store;
+        [
+            s.hot.capacity(),
+            s.relations.capacity(),
+            s.cold.capacity(),
+            s.data.capacity(),
+            s.parts.capacity(),
+            s.ops.capacity(),
+            s.listeners.capacity(),
+        ]
+    }
+
+    /// `reserve_nodes(n)` makes room for n nodes: building them grows no
+    /// list in the arena, and the graph built works as one built without.
+    #[test]
+    fn building_the_nodes_reserved_grows_nothing() {
+        let mut graph = Runtime::local();
+        let live = graph.live_nodes();
+        graph.reserve_nodes(100);
+        assert_eq!(graph.live_nodes(), live, "reserving makes no node");
+        let reserved = capacities(&graph);
+        let (numbers_in, cells) = graph.build(|b| {
+            let (numbers, numbers_in) = b.input::<u32>();
+            let numbers = numbers.share(b);
+            let cells: Vec<_> = (0..98u32)
+                .map(|k| numbers.map(move |x| x + k).hold(b, 0))
+                .collect();
+            (numbers_in, cells)
+        });
+        assert_eq!(graph.live_nodes(), live + 100);
+        assert_eq!(capacities(&graph), reserved);
+        graph.send(numbers_in, 1);
+        assert_eq!(*graph.sample(cells[97]), 98);
+    }
+
+    /// A slot that collection freed counts toward the room, so reserving
+    /// no more than the free list holds grows nothing.
+    #[test]
+    fn freed_slots_count_toward_the_room() {
+        let mut graph = Runtime::local();
+        graph.set_collection_policy(CollectionPolicy::Manual);
+        let built = graph.build_anchored(|b| (0..50u32).map(|k| b.constant(k)).collect::<Vec<_>>());
+        drop(built);
+        graph.collect_garbage();
+        let before = capacities(&graph);
+        let len = graph.build.store.hot.len();
+        assert!(
+            before.iter().all(|&c| c < len + 50),
+            "the test means nothing if the lists had room for 50 more anyway"
+        );
+        graph.reserve_nodes(50);
+        assert_eq!(capacities(&graph), before);
+        let _kept = graph.build(|b| (0..50u32).map(|k| b.constant(k)).collect::<Vec<_>>());
+        assert_eq!(capacities(&graph), before, "the 50 took the freed slots");
     }
 }
