@@ -5,6 +5,13 @@ name: Book
 on:
   pull_request:
 
+# A new push to a pull request cancels the run it replaces. Book only runs on
+# pull requests for now. The run_id arm gives every other run a group of its
+# own, for when the tags trigger comes back.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -12,7 +19,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Summary Header
         run: echo -e '# Build Result\n## Tool Versions' >> $GITHUB_STEP_SUMMARY

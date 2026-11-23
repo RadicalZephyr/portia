@@ -1,5 +1,4 @@
 /target
-/portia-gtk/target
 # GHC's build products, should anyone build in portia-oracle/haskell without
 # -outputdir. The tests build under target/tmp.
 /portia-oracle/haskell/**/*.o
